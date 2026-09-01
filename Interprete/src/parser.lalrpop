@@ -1,20 +1,52 @@
-use crate::ast::{Expression, IntrospectionKind, Literal, Mutability, Program, ScalarSuffix, Statement, VariableDeclaration, VariableType};
+use crate::ast::{BinaryOperator, Expression, Identity, IntrospectionKind, Literal, MetadataEntry, MetadataValue, Mutability, Program, ScalarSuffix, Statement, UnaryOperator, VariableDeclaration, VariableType};
 use std::str::FromStr;
 
 grammar;
+
 pub Program: Program = {
-    <statements:Stmt*> => Program { statements }
+    "env" "{" <environment:MetadataEntry*> "}"
+    "capabilities" "{" <capabilities:MetadataEntry*> "}"
+    <identity:Identity>
+    "fn" "main" "{" <main:Statement*> "}"
+        => Program { environment, capabilities, identity, main }
 };
 
-Stmt: Statement = {
-    "let" <spec:DeclarationSpec> <name:ID> "=" <value:Literal> ";" =>
-        Statement::Variable(VariableDeclaration {
-            name,
-            mutability: spec.0,
-            ty: spec.1,
-            value,
-        }),
+Identity: Identity = {
+    "identity" "{" "name" ":" <name:StringValue> ";" <variables:VariableDeclaration*> "}"
+        => Identity { name, variables }
+};
+
+MetadataEntry: MetadataEntry = {
+    <key:ID> ":" <value:MetadataValue> ";" => MetadataEntry { key, value }
+};
+
+MetadataValue: MetadataValue = {
+    <value:Literal> => MetadataValue::Literal(value),
+    <identifier:ID> => MetadataValue::Identifier(identifier),
+    "[" <values:MetadataValues> "]" => MetadataValue::Array(values),
+};
+
+MetadataValues: Vec<MetadataValue> = {
+    => vec![],
+    <first:MetadataValue> <rest:("," <MetadataValue>)*> => {
+        let mut values = vec![first];
+        values.extend(rest);
+        values
+    }
+};
+
+Statement: Statement = {
+    <declaration:VariableDeclaration> => Statement::Variable(declaration),
+    <name:ID> "=" <value:Expression> ";" => Statement::Assignment { name, value },
     "display" "(" <arguments:DisplayArguments> ")" ";" => Statement::Display(arguments),
+    "if" "(" <condition:Expression> ")" "{" <then_branch:Statement*> "}" <else_branch:("else" "{" <Statement*> "}")?> =>
+        Statement::If { condition, then_branch, else_branch: else_branch.map(|(_, _, statements, _)| statements) },
+    "#" <name:ID> "{" <body:Statement*> "}" => Statement::Chunk { name, body },
+};
+
+VariableDeclaration: VariableDeclaration = {
+    "let" <spec:DeclarationSpec> <name:ID> "=" <value:Expression> ";" =>
+        VariableDeclaration { name, mutability: spec.0, ty: spec.1, value }
 };
 
 DisplayArguments: Vec<Expression> = {
@@ -26,10 +58,89 @@ DisplayArguments: Vec<Expression> = {
     }
 };
 
-Expression: Expression = {
+Expression: Expression = LogicalOr;
+
+LogicalOr: Expression = {
+    <left:LogicalOr> "||" <right:LogicalAnd> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::LogicalOr, right: Box::new(right) },
+    LogicalAnd,
+};
+
+LogicalAnd: Expression = {
+    <left:LogicalAnd> "&&" <right:BitOr> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::LogicalAnd, right: Box::new(right) },
+    BitOr,
+};
+
+BitOr: Expression = {
+    <left:BitOr> "|" <right:BitXor> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::BitOr, right: Box::new(right) },
+    BitXor,
+};
+
+BitXor: Expression = {
+    <left:BitXor> "^" <right:BitAnd> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::BitXor, right: Box::new(right) },
+    BitAnd,
+};
+
+BitAnd: Expression = {
+    <left:BitAnd> "&" <right:Equality> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::BitAnd, right: Box::new(right) },
+    Equality,
+};
+
+Equality: Expression = {
+    <left:Comparison> "==" <right:Comparison> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::Equal, right: Box::new(right) },
+    <left:Comparison> "!=" <right:Comparison> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::NotEqual, right: Box::new(right) },
+    Comparison,
+};
+
+Comparison: Expression = {
+    <left:Shift> ">=" <right:Shift> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::GreaterEqual, right: Box::new(right) },
+    <left:Shift> "<=" <right:Shift> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::LessEqual, right: Box::new(right) },
+    <left:Shift> ">" <right:Shift> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::Greater, right: Box::new(right) },
+    <left:Shift> "<" <right:Shift> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::Less, right: Box::new(right) },
+    Shift,
+};
+
+Shift: Expression = {
+    <left:Shift> "<<" <right:Additive> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::ShiftLeft, right: Box::new(right) },
+    <left:Shift> ">>" <right:Additive> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::ShiftRight, right: Box::new(right) },
+    Additive,
+};
+
+Additive: Expression = {
+    <left:Additive> "+" <right:Multiplicative> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::Add, right: Box::new(right) },
+    <left:Additive> "-" <right:Multiplicative> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::Subtract, right: Box::new(right) },
+    Multiplicative,
+};
+
+Multiplicative: Expression = {
+    <left:Multiplicative> "*" <right:Unary> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::Multiply, right: Box::new(right) },
+    <left:Multiplicative> "/" <right:Unary> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::Divide, right: Box::new(right) },
+    <left:Multiplicative> "%" <right:Unary> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::Remainder, right: Box::new(right) },
+    Unary,
+};
+
+Unary: Expression = {
+    "!" <expression:Unary> => Expression::Unary { operator: UnaryOperator::Not, expression: Box::new(expression) },
+    "-" <expression:Unary> => Expression::Unary { operator: UnaryOperator::Negate, expression: Box::new(expression) },
+    "~" <expression:Unary> => Expression::Unary { operator: UnaryOperator::BitNot, expression: Box::new(expression) },
+    Power,
+};
+
+Power: Expression = {
+    <left:Primary> "**" <right:Unary> => Expression::Binary { left: Box::new(left), operator: BinaryOperator::Power, right: Box::new(right) },
+    Primary,
+};
+
+Primary: Expression = {
     <value:Literal> => Expression::Literal(value),
     <introspection:Introspection> => introspection,
+    <if_expression:IfExpression> => if_expression,
+    "(" <expression:Expression> ")" => expression,
     <name:ID> => Expression::Variable(name),
+};
+
+IfExpression: Expression = {
+    "if" "(" <condition:Expression> ")" "{" <then_value:Expression> "}" "else" "{" <else_value:Expression> "}" =>
+        Expression::If { condition: Box::new(condition), then_value: Box::new(then_value), else_value: Box::new(else_value) }
 };
 
 Introspection: Expression = {
@@ -76,11 +187,15 @@ ScalarSuffix: ScalarSuffix = {
 };
 
 Literal: Literal = {
-    <n:r"-?[0-9]+"> => Literal::Integer(i64::from_str(n).unwrap()),
-    <n:r"-?[0-9]+\.[0-9]+"> => Literal::Float(f64::from_str(n).unwrap()),
+    <n:r"[0-9]+\.[0-9]+"> => Literal::Float(f64::from_str(n).unwrap()),
+    <n:r"[0-9]+"> => Literal::Integer(i64::from_str(n).unwrap()),
     <s:r#"\"[^\"]*\""#> => Literal::String(s[1..s.len() - 1].to_string()),
     "true" => Literal::Bool(true),
     "false" => Literal::Bool(false),
+};
+
+StringValue: String = {
+    <s:r#"\"[^\"]*\""#> => s[1..s.len() - 1].to_string(),
 };
 
 ID: String = {
