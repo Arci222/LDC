@@ -1,10 +1,10 @@
 # LDC
 
-**Sistema Nervoso Arci Complexity Kicker**
+**Laplace Demon code**
 
 ## Cos'è
 
-SNACK è un linguaggio di programmazione per sistemi IoT ed embedded che sto sviluppando come progetto personale.
+LDC è un linguaggio di programmazione per sistemi IoT ed embedded che sto sviluppando come progetto personale.
 
 L'ho iniziato a 14 anni con l'obiettivo di creare un'alternativa a C e MicroPython più semplice da usare e pensata per microcontrollori con poche risorse.
 
@@ -14,7 +14,7 @@ L'ho iniziato a 14 anni con l'obiettivo di creare un'alternativa a C e MicroPyth
 * Semplificare la comunicazione tra più microcontrollori
 * Separare la logica dalle regole di sicurezza
 * Introdurre nuovi costrutti per i cicli
-* Sfruttare al massimo hardware come Raspberry Pi Pico
+* Sfruttare al massimo hardware come teensy 4.0 e e arduino UNO
 
 ## Stato
 
@@ -22,5 +22,6 @@ L'ho iniziato a 14 anni con l'obiettivo di creare un'alternativa a C e MicroPyth
 * AST
 * Interprete
 * Linguaggio in sviluppo
+* codegen C
 
-SNACK è un progetto sperimentale e la sintassi può cambiare.
+LDC è un progetto sperimentale e la sintassi può cambiare.
