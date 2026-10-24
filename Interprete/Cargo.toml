@@ -2,6 +2,12 @@
 name = "Interprete"
 version = "0.1.0"
 edition = "2024"
+default-run = "ldc"
+autobins = false
+
+[[bin]]
+name = "ldc"
+path = "src/main.rs"
 
 [dependencies]
 lalrpop = "0.23.2"

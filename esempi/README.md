@@ -20,6 +20,15 @@ Per visualizzare il C generato dallo stesso esempio:
 cargo run --manifest-path Interprete/Cargo.toml -- --emit-c Interprete/examples/funzioni.spln
 ```
 
+Il comando `ldc` salva invece il file C in una cartella `ldc-output` accanto al sorgente, senza usare `/tmp`. Per installarlo dopo aver installato Rust:
+
+```sh
+cargo install --path Interprete
+ldc Interprete/examples/funzioni.spln
+```
+
+Il comando stampa il percorso completo del C generato. Per avviare l'interprete si usa `ldc --run <file.spln>`.
+
 Per eseguire tutti gli esempi in sequenza:
 
 ```sh
