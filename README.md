@@ -140,3 +140,5 @@ Dopo aver aggiornato o modificato il codice Rust di LDC, reinstalla il comando:
 ```sh
 cargo install --path Interprete --force
 ```
+
+LDC è sperimentale è un progetto in corso la sintassi potrebbe cambiare
