@@ -1,0 +1,25 @@
+env {
+    target: "host";
+    ram: 4096;
+}
+
+capabilities {
+}
+
+identity {
+    name: "Condizioni";
+}
+
+fn main {
+    let.mut.32bit score = 12;
+    let enabled = true;
+
+    if (enabled && score >= 10) {
+        display("soglia superata");
+    } else {
+        display("soglia non superata");
+    }
+
+    let category = if (score > 10) { "alto" } else { "basso" };
+    display(category);
+}

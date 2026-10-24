@@ -1,0 +1,22 @@
+env {
+    target: "host";
+    ram: 4096;
+}
+
+capabilities {
+}
+
+identity {
+    name: "Introspezione";
+}
+
+fn main {
+    let.mut.unsigned.8bit level = 7;
+    let.const.16bit.string label = "temperatura";
+
+    display(type_of(level));
+    display(sign_of(level));
+    display(bit_size_of(level));
+    display(is_mut(level));
+    display(identity_of(label));
+}

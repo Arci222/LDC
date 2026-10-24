@@ -1,0 +1,32 @@
+env {
+    target: "host";
+    ram: 4096;
+}
+
+capabilities {
+}
+
+identity {
+    name: "Funzioni";
+
+    fn somma(a: 32bit, b: 32bit) -> 32bit {
+        return a + b;
+    }
+}
+
+fn doppio(valore: 32bit) -> 32bit {
+    return somma(valore, valore);
+}
+
+fn saluta(nome: string) -> void {
+    display("Ciao", nome);
+}
+
+fn main {
+    let risultato = doppio(21);
+    display("Il doppio di 21 e':", risultato);
+    saluta("Ada");
+    
+    let tot = somma(6, 9);
+    display(tot);
+}

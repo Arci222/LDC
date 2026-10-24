@@ -1,0 +1,25 @@
+env {
+    target: "host";
+    ram: 4096;
+}
+
+capabilities {
+}
+
+identity {
+    name: "Variabili";
+    let.const.unsigned.8bit id_code = 42;
+}
+
+fn main {
+    let count = 3;
+    let.mut.unsigned.8bit age = 30;
+    let.const.32bit.float pi = 3.14159;
+    let.const.bool active = true;
+    let.const.16bit.string label = "sensore";
+
+    age = age + 1;
+    display("count:", count, "age:", age);
+    display("pi:", pi, "active:", active, "label:", label);
+    display("id:", id_code);
+}

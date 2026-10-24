@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOperator, Expression, Identity, IntrospectionKind, Literal, MetadataEntry, MetadataValue, Mutability, Program, ScalarSuffix, Statement, UnaryOperator, VariableDeclaration, VariableType};
+use crate::ast::{BinaryOperator, Expression, Function, Identity, IdentityItem, IntrospectionKind, Literal, MetadataEntry, MetadataValue, Mutability, Parameter, Program, ScalarSuffix, Statement, UnaryOperator, VariableDeclaration, VariableType};
 use std::str::FromStr;
 
 grammar;
@@ -7,13 +7,60 @@ pub Program: Program = {
     "env" "{" <environment:MetadataEntry*> "}"
     "capabilities" "{" <capabilities:MetadataEntry*> "}"
     <identity:Identity>
+    <top_functions:FunctionDefinition*>
     "fn" "main" "{" <main:Statement*> "}"
-        => Program { environment, capabilities, identity, main }
+        => {
+            let mut functions = identity.functions.clone();
+            functions.extend(top_functions);
+            Program { environment, capabilities, identity, functions, main }
+        }
+};
+
+FunctionDefinition: Function = {
+    "fn" <name:ID> "(" <parameters:Parameters> ")" "->" <return_type:FunctionReturnType> "{" <body:Statement*> "}"
+        => Function { name, parameters, return_type, body }
+};
+
+FunctionReturnType: Option<VariableType> = {
+    "void" => None,
+    <ty:TypeSpec> => Some(ty),
+};
+
+Parameters: Vec<Parameter> = {
+    => vec![],
+    <first:Parameter> <rest:("," <Parameter>)*> => {
+        let mut parameters = vec![first];
+        parameters.extend(rest);
+        parameters
+    }
+};
+
+Parameter: Parameter = {
+    <name:ID> ":" <ty:TypeSpec> => Parameter { name, ty },
 };
 
 Identity: Identity = {
-    "identity" "{" "name" ":" <name:StringValue> ";" <variables:VariableDeclaration*> "}"
-        => Identity { name, variables }
+    "identity" "{" "name" ":" <name:StringValue> ";" <items:IdentityItems> "}"
+        => {
+            let mut variables = Vec::new();
+            let mut functions = Vec::new();
+            for item in items {
+                match item {
+                    IdentityItem::Variable(variable) => variables.push(variable),
+                    IdentityItem::Function(function) => functions.push(function),
+                }
+            }
+            Identity { name, variables, functions }
+        }
+};
+
+IdentityItems: Vec<IdentityItem> = {
+    <items:IdentityItem*> => items,
+};
+
+IdentityItem: IdentityItem = {
+    <variable:VariableDeclaration> => IdentityItem::Variable(variable),
+    <function:FunctionDefinition> => IdentityItem::Function(function),
 };
 
 MetadataEntry: MetadataEntry = {
@@ -39,8 +86,10 @@ Statement: Statement = {
     <declaration:VariableDeclaration> => Statement::Variable(declaration),
     <name:ID> "=" <value:Expression> ";" => Statement::Assignment { name, value },
     "display" "(" <arguments:DisplayArguments> ")" ";" => Statement::Display(arguments),
+    "return" <value:Expression?> ";" => Statement::Return(value),
+    <expression:FunctionCall> ";" => Statement::Expression(expression),
     "if" "(" <condition:Expression> ")" "{" <then_branch:Statement*> "}" <else_branch:("else" "{" <Statement*> "}")?> =>
-        Statement::If { condition, then_branch, else_branch: else_branch.map(|(_, _, statements, _)| statements) },
+        Statement::If { condition, then_branch, else_branch },
     "#" <name:ID> "{" <body:Statement*> "}" => Statement::Chunk { name, body },
 };
 
@@ -134,8 +183,13 @@ Primary: Expression = {
     <value:Literal> => Expression::Literal(value),
     <introspection:Introspection> => introspection,
     <if_expression:IfExpression> => if_expression,
+    <call:FunctionCall> => call,
     "(" <expression:Expression> ")" => expression,
     <name:ID> => Expression::Variable(name),
+};
+
+FunctionCall: Expression = {
+    <name:ID> "(" <arguments:DisplayArguments> ")" => Expression::Call { name, arguments },
 };
 
 IfExpression: Expression = {
@@ -155,6 +209,18 @@ IntrospectionArgument: Expression = {
     <name:ID> => Expression::Variable(name),
     <value:Literal> => Expression::Literal(value),
     <introspection:Introspection> => introspection,
+};
+
+TypeSpec: VariableType = {
+    "bool" => VariableType::Bool,
+    "string" => VariableType::String { bits: 16 },
+    "float" => VariableType::Float { bits: 32 },
+    <sign:("unsigned" ".")?> <bits:BitWidth> <suffix:("." <ScalarSuffix>)?> => match suffix {
+        Some(ScalarSuffix::Float) => VariableType::Float { bits },
+        Some(ScalarSuffix::String) => VariableType::String { bits },
+        Some(ScalarSuffix::Bool) => VariableType::Bool,
+        None => VariableType::Integer { bits, unsigned: sign.is_some() },
+    },
 };
 
 DeclarationSpec: (Mutability, VariableType) = {

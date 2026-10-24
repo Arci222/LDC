@@ -1,0 +1,23 @@
+env {
+    target: "host";
+    ram: 4096;
+}
+
+capabilities {
+}
+
+identity {
+    name: "Chunk";
+}
+
+fn main {
+    let.mut.32bit total = 10;
+
+    #calcolo {
+        let temporary = 5;
+        total = total + temporary;
+        display("dentro:", total);
+    }
+
+    display("fuori:", total);
+}

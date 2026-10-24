@@ -204,6 +204,8 @@ let.mut.bool active = true;
 | `16bit.string` | 65.535 byte |
 | `32bit.string` | 4 GB |
 
+Le stringhe contengono sempre testo codificato in **UTF-8**; in 0.1 non sono supportati encoding alternativi. I tipi interi disponibili in 0.1 sono solo `8bit`, `16bit` e `32bit`, ciascuno signed o unsigned. Non esiste un tipo intero `64bit`.
+
 **Float:** `32bit.float` è IEEE 754 binary32 (singola precisione). Non esiste `64bit.float` in 0.1 — su MCU 8/16 bit il costo di una FPU software per double precision non è giustificato dai casi d'uso tipici embedded.
 
 **`void`:** non è un tipo dichiarabile per una variabile — esiste solo come tipo di ritorno di funzione (`-> void`, §13), a marcare l'assenza di valore restituito.
@@ -311,7 +313,7 @@ switch (cursore) {
 
 **Confronto diretto (`==`/`!=`) con una variante senza payload** (es. `cursore != Link::End`) è permesso ed è l'unico caso di accesso a un `enum` fuori da `switch`: confrontare con una variante senza dati non richiede pattern binding, quindi non c'è nulla da estrarre. Confrontare con una variante **con** payload (es. `cursore == Link::Node(1)`) non è permesso: serve `switch` per poter estrarre il valore contenuto.
 
-**Perché `default` è sempre obbligatorio** (anche quando lo `switch` sembra già esaustivo): scelta deliberata per la compatibilità tra versioni. Un `enum` può essere dichiarato in un blocco (§III.0) versionato indipendentemente, e una nuova variante aggiunta in una versione successiva non deve rompere la compilazione del codice che già usa quell'enum altrove. Si rinuncia alla verifica di esaustività a compile-time in cambio di un comportamento sempre definito, anche per varianti non ancora previste quando il codice è stato scritto.
+**Perché `default` è sempre obbligatorio** (anche quando lo `switch` sembra già esaustivo): scelta deliberata per la compatibilità tra versioni. Un `enum` può essere dichiarato in un blocco (§III.0) versionato indipendentemente, e una nuova variante aggiunta in una versione successiva non deve rompere la compilazione del codice che già usa quell'enum altrove. Si rinuncia alla verifica di esaustività a compile-time in cambio di un comportamento sempre definito, anche per varianti non ancora previste quando il codice è stato scritto. Di conseguenza, il compilatore **non** emette un warning per `default` ritenuto inutile in uno `switch` apparentemente esaustivo.
 
 ## 8. Operatori
 
@@ -349,16 +351,16 @@ push(arr, value)  pop(arr)  insert(arr, i, value)  remove(arr, i)  clear(arr)
 sum average min max
 take unlink
 ```
-`length(s)` conta byte; per contare caratteri Unicode usare `char_length(s)` (conta code point, **non** grapheme cluster: un'emoji composta da più code point conta come più di 1); per il tetto del buffer usare `max_length(s)`. `concat` il cui risultato supera `max_length` del tipo di destinazione: crash, stessa categoria di `push` su array pieno (§6). `insert(arr, i, value)` sposta gli elementi da `i` in poi di una posizione; `i` fuori range (`i > length(arr)`): crash. `pop(arr)` rimuove e ritorna l'ultimo elemento. `remove(arr, i)` rimuove l'elemento all'indice `i`, spostando i successivi (vietato su array-nodo, §II.12). `sum`/`average`/`min`/`max` funzionano identicamente su array di interi e di `float`, nessuna differenza di comportamento. `take` funziona anche su array di `struct`: lo slice risultante espone gli stessi campi dell'elemento, con le stesse regole di mutabilità per campo di §4/§5.
+`length(s)` conta byte; per contare caratteri Unicode usare `char_length(s)` (conta code point, **non** grapheme cluster: un'emoji composta da più code point conta come più di 1); per il tetto del buffer usare `max_length(s)`. Le stringhe vuote sono valide per `concat`: `concat("", s)` e `concat(s, "")` producono una copia di `s` (e `concat("", "")` una stringa vuota). `concat` il cui risultato supera `max_length` del tipo di destinazione: crash, stessa categoria di `push` su array pieno (§6). `insert(arr, i, value)` sposta gli elementi da `i` in poi di una posizione; `i` fuori range (`i > length(arr)`): crash. `pop(arr)` rimuove e ritorna l'ultimo elemento. `remove(arr, i)` rimuove l'elemento all'indice `i`, spostando i successivi (vietato su array-nodo, §II.12). `sum`/`average`/`min`/`max` funzionano identicamente su array di interi e di `float`, nessuna differenza di comportamento. `take` funziona anche su array di `struct`: lo slice risultante espone gli stessi campi dell'elemento, con le stesse regole di mutabilità per campo di §4/§5.
 
 **I/O:**
 ```text
 read_file(path)  write_file(path, contenuto)  include(path)
-display(...)     // variadica, separatore spazio, newline finale, solo tipi built-in
+display(...)     // variadica, separatore spazio, newline finale, solo valori scalari (numerici, bool, string)
 ```
 `display()` non accetta `struct`/`array`/`tuple` direttamente: per stamparli, passare i singoli campi/elementi come argomenti separati, es. `display(sensor.label, sensor.average);` — restano built-in i *valori* dei campi anche se il contenitore non lo è. `write_file` **sovrascrive** se il file esiste, lo **crea** se non esiste (nessuna modalità append in 0.1). `read_file`/`write_file`/`include` risolvono i path **relativi alla directory del progetto** (dove sta `main.ldc`), non alla working directory del processo.
 
-**Introspezione:** `type_of sign_of bit_size_of is_mut identity_of`. **Hardware:** `set_pin_mode write_pin read_pin read_analog set_pwm delay tone pulse_in read_dht` + I2C/SPI/UART/servo. **Controllo:** `checkpoint reset` (istruzioni), `pause stop` (listener), `is_online` (bridge, §II.5).
+**Introspezione:** `type_of sign_of bit_size_of is_mut identity_of`. **Hardware:** `set_pin_mode write_pin read_pin read_analog set_pwm delay tone pulse_in read_dht` + I2C/SPI/UART/servo. **Controllo:** `checkpoint reset` (istruzioni), `pause stop` (listener), `is_online(#nome) -> bool` (bridge, §II.5).
 
 ## 10. Introspezione
 
@@ -367,9 +369,9 @@ Risolte a compile-time, zero costo runtime.
 ```text
 type_of(x)       // "unsigned.8bit"
 sign_of(x)       // "signed" | "unsigned"
-bit_size_of(x)   // 8, 16, 32
+bit_size_of(x)   // intero: larghezza in bit; stringa: tag di categoria 8, 16 o 32
 is_mut(x)        // bool
-identity_of(x)   // struct TypeIdentity
+identity_of(x)   // struct TypeIdentity, con metadati statici del tipo e del binding
 ```
 
 ```text
@@ -380,9 +382,9 @@ struct TypeIdentity {
     mut:  let.const.bool
 }
 ```
-`TypeIdentity` è una `struct` ordinaria — nessuna magia del compilatore — segue le normali regole di mutabilità per campo (§4/§5): i suoi campi sono semplicemente tutti dichiarati `const` nella definizione.
+`identity_of(x)` restituisce una `TypeIdentity` contenente `type` (lo stesso nome di tipo restituito da `type_of`), `sign` (`"signed"`, `"unsigned"` o `"none"` per `bool` e `string`), `bits` (larghezza numerica o tag di categoria della stringa; `1` per `bool`) e `mut` (se il binding è mutabile). `TypeIdentity` è una `struct` ordinaria — nessuna magia del compilatore — segue le normali regole di mutabilità per campo (§4/§5): i suoi campi sono semplicemente tutti dichiarati `const` nella definizione.
 
-`type_of(x)` per un tipo con `unsigned` omesso include comunque il segno per esteso: `let.mut.32bit x` → `"signed.32bit"` (mai omesso, anche se `unsigned` non è stato scritto nella dichiarazione). `sign_of(x)` su `bool`/`string`: errore di compilazione (non hanno segno); su `float`: sempre `"signed"` (non esiste `unsigned.float`). `bit_size_of` su stringa ritorna la categoria del buffer (8/16/32), **non** i byte usati: per quelli, `length`/`char_length`; per il tetto massimo del buffer, `max_length` (§9). Non si può passare a nessuna di queste funzioni una variabile il cui tipo dipende da un ramo runtime.
+`type_of(x)` per un tipo con `unsigned` omesso include comunque il segno per esteso: `let.mut.32bit x` → `"signed.32bit"` (mai omesso, anche se `unsigned` non è stato scritto nella dichiarazione). `sign_of(x)` su `bool`/`string`: errore di compilazione (non hanno segno); su `float`: sempre `"signed"` (non esiste `unsigned.float`). `bit_size_of` su stringa ritorna 8, 16 o 32 come **tag della categoria**, non come dimensione del buffer né come lunghezza attuale: per i byte usati, `length`/`char_length`; per il tetto massimo del buffer, `max_length` (§9). Non si può passare a nessuna di queste funzioni una variabile il cui tipo dipende da un ramo runtime.
 
 ## 11. Variabili Built-in
 
@@ -515,7 +517,7 @@ listener #temp_check (temperature > rule.max_temp) {
 }
 ```
 
-`pause(#nome)` sospende, `stop(#nome)` termina in modo permanente. `self` è una keyword riservata, non una variabile — si risolve al listener che la contiene. Un `listener` può riferirsi a un altro `listener` dichiarato **più avanti** nel file (come `#battery_check` fa con `#temp_check` sopra): la risoluzione dei nomi avviene in una prima passata su tutto il file, la forward reference è permessa. La condizione tra parentesi è **una singola espressione booleana**: per una condizione composta si usano `&&`/`||` (§I.8) dentro quell'unica espressione — non esiste una sintassi per più condizioni separate sullo stesso `listener`.
+`pause(#nome)` sospende, `stop(#nome)` termina in modo permanente. Entrambe accettano anche `self`: `pause(self)` sospende il listener corrente e `stop(self)` lo termina. `self` è una keyword riservata, non una variabile — si risolve al listener che la contiene. Un `listener` può riferirsi a un altro `listener` dichiarato **più avanti** nel file (come `#battery_check` fa con `#temp_check` sopra): la risoluzione dei nomi avviene in una prima passata su tutto il file, la forward reference è permessa. La condizione tra parentesi è **una singola espressione booleana**: per una condizione composta si usano `&&`/`||` (§I.8) dentro quell'unica espressione — non esiste una sintassi per più condizioni separate sullo stesso `listener`.
 
 **Modello:** listener **cooperativi**, non preemptive. Ricontrollati a punti di yield: al confine di ogni chunk e a ogni tick di `delay()` (§3). "Priorità assoluta" = ordine tra listener allo stesso yield. Se il programma non raggiunge mai un punto di yield (nessun chunk, nessun `delay()`), i listener semplicemente non girano mai — e lo stesso ciclo che li affama fa scadere il watchdog (§I.12), quindi la situazione si risolve comunque con un crash/recovery, non con un blocco silenzioso indefinito.
 
@@ -1791,6 +1793,8 @@ security {
     profile: "paranoid";   // paranoid | standard | permissive
 }
 ```
+
+Se `profile` è omesso, il default è `standard`.
 
 | Decisione | paranoid | standard | permissive |
 |---|---|---|---|

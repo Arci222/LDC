@@ -5,7 +5,22 @@ pub struct Program {
     pub environment: Vec<MetadataEntry>,
     pub capabilities: Vec<MetadataEntry>,
     pub identity: Identity,
+    pub functions: Vec<Function>,
     pub main: Vec<Statement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Function {
+    pub name: String,
+    pub parameters: Vec<Parameter>,
+    pub return_type: Option<VariableType>,
+    pub body: Vec<Statement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Parameter {
+    pub name: String,
+    pub ty: VariableType,
 }
 
 #[derive(Debug, Clone)]
@@ -25,6 +40,13 @@ pub enum MetadataValue {
 pub struct Identity {
     pub name: String,
     pub variables: Vec<VariableDeclaration>,
+    pub functions: Vec<Function>,
+}
+
+#[derive(Debug, Clone)]
+pub enum IdentityItem {
+    Variable(VariableDeclaration),
+    Function(Function),
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +57,8 @@ pub enum Statement {
         value: Expression,
     },
     Display(Vec<Expression>),
+    Expression(Expression),
+    Return(Option<Expression>),
     If {
         condition: Expression,
         then_branch: Vec<Statement>,
@@ -101,6 +125,10 @@ pub enum Expression {
         operator: BinaryOperator,
         right: Box<Expression>,
     },
+    Call {
+        name: String,
+        arguments: Vec<Expression>,
+    },
     If {
         condition: Box<Expression>,
         then_value: Box<Expression>,
@@ -159,6 +187,11 @@ struct Scope {
     frames: Vec<HashMap<String, RuntimeVariable>>,
 }
 
+enum ExecutionFlow {
+    Continue,
+    Return(Option<Literal>),
+}
+
 impl Scope {
     fn new() -> Self {
         Self {
@@ -215,13 +248,18 @@ impl Program {
         let mut output = Vec::new();
 
         for declaration in &self.identity.variables {
-            let value = declaration.value.evaluate(&scope)?;
+            let value = declaration.value.evaluate(&mut scope, &self.functions, &mut output)?;
             scope.declare(declaration, value)?;
         }
 
         // Le variabili top-level di fn main hanno il loro scope persistente.
         scope.push_frame();
-        execute_statements(&self.main, &mut scope, &mut output)?;
+        if matches!(
+            execute_statements(&self.main, &mut scope, &mut output, &self.functions)?,
+            ExecutionFlow::Return(_)
+        ) {
+            return Err("return puo' essere usato solo dentro una funzione".to_string());
+        }
 
         Ok(output)
     }
@@ -231,11 +269,12 @@ fn execute_statements(
     statements: &[Statement],
     scope: &mut Scope,
     output: &mut Vec<String>,
-) -> Result<(), String> {
+    functions: &[Function],
+) -> Result<ExecutionFlow, String> {
     for statement in statements {
         match statement {
             Statement::Variable(declaration) => {
-                let value = declaration.value.evaluate(scope)?;
+                let value = declaration.value.evaluate(scope, functions, output)?;
                 scope.declare(declaration, value)?;
             }
             Statement::Assignment { name, value } => {
@@ -246,23 +285,37 @@ fn execute_statements(
                 if variable.mutability == Mutability::Constant {
                     return Err(format!("non puoi assegnare a '{name}': e' una let.const"));
                 }
-                let value = value.evaluate(scope)?;
+                let value = value.evaluate(scope, functions, output)?;
                 variable.ty.validate_value_named(name, &value)?;
                 scope.assign(name, value)?;
             }
             Statement::Display(expressions) => {
                 let values = expressions
                     .iter()
-                    .map(|expression| expression.evaluate(scope).map(|value| value.display()))
+                    .map(|expression| expression.evaluate(scope, functions, output).map(|value| value.display()))
                     .collect::<Result<Vec<_>, _>>()?;
                 output.push(values.join(" "));
+            }
+            Statement::Expression(expression) => {
+                if let Expression::Call { name, arguments } = expression {
+                    invoke_function(name, arguments, scope, output, functions)?;
+                } else {
+                    return Err("come istruzione e' ammessa solo una chiamata di funzione".to_string());
+                }
+            }
+            Statement::Return(expression) => {
+                let value = expression
+                    .as_ref()
+                    .map(|expression| expression.evaluate(scope, functions, output))
+                    .transpose()?;
+                return Ok(ExecutionFlow::Return(value));
             }
             Statement::If {
                 condition,
                 then_branch,
                 else_branch,
             } => {
-                let condition = condition.evaluate(scope)?.as_bool("la condizione di if")?;
+                let condition = condition.evaluate(scope, functions, output)?.as_bool("la condizione di if")?;
                 let branch = if condition {
                     Some(then_branch)
                 } else {
@@ -272,9 +325,11 @@ fn execute_statements(
                     // Un blocco if ha scope lessicale proprio; le assegnazioni alle
                     // variabili esterne restano invece visibili dopo il blocco.
                     scope.push_frame();
-                    let result = execute_statements(branch, scope, output);
+                    let result = execute_statements(branch, scope, output, functions);
                     scope.pop_frame();
-                    result?;
+                    if let ExecutionFlow::Return(value) = result? {
+                        return Ok(ExecutionFlow::Return(value));
+                    }
                 }
             }
             Statement::Chunk { name: _, body } => {
@@ -282,11 +337,80 @@ fn execute_statements(
                 // una let.mut ereditata, ma la modifica viene scartata alla chiusura.
                 let mut child_scope = scope.clone();
                 child_scope.push_frame();
-                execute_statements(body, &mut child_scope, output)?;
+                if let ExecutionFlow::Return(value) =
+                    execute_statements(body, &mut child_scope, output, functions)?
+                {
+                    return Ok(ExecutionFlow::Return(value));
+                }
             }
         }
     }
-    Ok(())
+    Ok(ExecutionFlow::Continue)
+}
+
+fn invoke_function(
+    name: &str,
+    arguments: &[Expression],
+    scope: &mut Scope,
+    output: &mut Vec<String>,
+    functions: &[Function],
+) -> Result<Option<Literal>, String> {
+    let function = functions
+        .iter()
+        .find(|function| function.name == name)
+        .cloned()
+        .ok_or_else(|| format!("la funzione '{name}' non e' stata dichiarata"))?;
+    if arguments.len() != function.parameters.len() {
+        return Err(format!(
+            "la funzione '{name}' richiede {} argomenti, ricevuti {}",
+            function.parameters.len(),
+            arguments.len()
+        ));
+    }
+
+    let values = arguments
+        .iter()
+        .map(|argument| argument.evaluate(scope, functions, output))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    scope.push_frame();
+    let setup_result = function
+        .parameters
+        .iter()
+        .zip(values)
+        .try_for_each(|(parameter, value)| {
+            parameter.ty.validate_value_named(&parameter.name, &value)?;
+            scope.declare(
+                &VariableDeclaration {
+                    name: parameter.name.clone(),
+                    mutability: Mutability::Constant,
+                    ty: parameter.ty.clone(),
+                    value: Expression::Literal(value.clone()),
+                },
+                value,
+            )
+        });
+    if let Err(error) = setup_result {
+        scope.pop_frame();
+        return Err(error);
+    }
+
+    let execution = execute_statements(&function.body, scope, output, functions);
+    scope.pop_frame();
+    let returned = match execution? {
+        ExecutionFlow::Continue => None,
+        ExecutionFlow::Return(value) => Some(value),
+    };
+
+    match (function.return_type, returned) {
+        (Some(expected), Some(Some(value))) => {
+            expected.validate_value_named("valore restituito", &value)?;
+            Ok(Some(value))
+        }
+        (Some(_), _) => Err(format!("la funzione '{name}' non ha restituito un valore")),
+        (None, Some(Some(_))) => Err(format!("la funzione '{name}' e' void e non puo' restituire un valore")),
+        (None, Some(None) | None) => Ok(None),
+    }
 }
 
 impl VariableDeclaration {
@@ -447,7 +571,12 @@ impl Literal {
 }
 
 impl Expression {
-    fn evaluate(&self, scope: &Scope) -> Result<Literal, String> {
+    fn evaluate(
+        &self,
+        scope: &mut Scope,
+        functions: &[Function],
+        output: &mut Vec<String>,
+    ) -> Result<Literal, String> {
         match self {
             Self::Literal(value) => Ok(value.clone()),
             Self::Variable(name) => scope
@@ -472,39 +601,43 @@ impl Expression {
             Self::Unary {
                 operator,
                 expression,
-            } => operator.evaluate(expression.evaluate(scope)?),
+            } => operator.evaluate(expression.evaluate(scope, functions, output)?),
             Self::Binary {
                 left,
                 operator,
                 right,
             } => {
                 if matches!(operator, BinaryOperator::LogicalAnd) {
-                    let left = left.evaluate(scope)?.as_bool("il lato sinistro di &&")?;
+                    let left = left.evaluate(scope, functions, output)?.as_bool("il lato sinistro di &&")?;
                     return if left {
-                        Ok(Literal::Bool(right.evaluate(scope)?.as_bool("il lato destro di &&")?))
+                        Ok(Literal::Bool(right.evaluate(scope, functions, output)?.as_bool("il lato destro di &&")?))
                     } else {
                         Ok(Literal::Bool(false))
                     };
                 }
                 if matches!(operator, BinaryOperator::LogicalOr) {
-                    let left = left.evaluate(scope)?.as_bool("il lato sinistro di ||")?;
+                    let left = left.evaluate(scope, functions, output)?.as_bool("il lato sinistro di ||")?;
                     return if left {
                         Ok(Literal::Bool(true))
                     } else {
-                        Ok(Literal::Bool(right.evaluate(scope)?.as_bool("il lato destro di ||")?))
+                        Ok(Literal::Bool(right.evaluate(scope, functions, output)?.as_bool("il lato destro di ||")?))
                     };
                 }
-                operator.evaluate(left.evaluate(scope)?, right.evaluate(scope)?)
+                operator.evaluate(left.evaluate(scope, functions, output)?, right.evaluate(scope, functions, output)?)
+            }
+            Self::Call { name, arguments } => {
+                invoke_function(name, arguments, scope, output, functions)?
+                    .ok_or_else(|| format!("la funzione '{name}' e' void e non restituisce un valore"))
             }
             Self::If {
                 condition,
                 then_value,
                 else_value,
             } => {
-                if condition.evaluate(scope)?.as_bool("la condizione di if")? {
-                    then_value.evaluate(scope)
+                if condition.evaluate(scope, functions, output)?.as_bool("la condizione di if")? {
+                    then_value.evaluate(scope, functions, output)
                 } else {
-                    else_value.evaluate(scope)
+                    else_value.evaluate(scope, functions, output)
                 }
             }
         }

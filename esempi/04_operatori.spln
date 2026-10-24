@@ -1,0 +1,21 @@
+env {
+    target: "host";
+    ram: 4096;
+}
+
+capabilities {
+}
+
+identity {
+    name: "Operatori";
+}
+
+fn main {
+    let arithmetic = (5 * 2) ** 3 - 10 / 2 % 3;
+    let bits = (1 << 2) | (8 >> 1);
+    let logic = true && !false;
+
+    display("aritmetica:", arithmetic);
+    display("bitwise:", bits);
+    display("logica:", logic);
+}
