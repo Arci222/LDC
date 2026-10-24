@@ -13,12 +13,12 @@ identity {
 fn main {
     let x = 10;
     let ok = true;
-    let name = "Ada";
+    let username = "Ada";
     let.mut.unsigned.8bit age = 30;
     let.const.32bit.float pi = 3.14159;
     let.const.16bit.string label = "temp_A0";
     let.mut.bool active = true;
 
     age = age + 1;
-    display(x, ok, name, age, pi, label, active);
+    display(x, ok, username, age, pi, label, active);
 }
