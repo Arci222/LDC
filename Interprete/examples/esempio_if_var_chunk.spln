@@ -1,0 +1,48 @@
+env {
+    os: "linux";
+    version: 1;
+    features: [math, logic, introspection];
+}
+
+capabilities {
+    read: true;
+    write: false;
+}
+
+identity {
+    name: "DemoCompleta";
+    let.const.unsigned.8bit id_code = 42;
+}
+
+fn main {
+    let counter = 0;
+    let.const.32bit.float pi = 3.14;
+    let.const.bool is_active = true;
+    let.mut.32bit.string message = "Inizio esecuzione";
+    
+    counter = counter + 1;
+
+    let math_res = (5 * 2) ** 3 - 10 / 2 % 3;
+    let bit_res = (1 << 2) | (8 >> 1) & ~0 ^ 3;
+    let logic_res = is_active && (counter > 0) || !false;
+
+    let status = if (counter == 1) { "Singolo" } else { "Multiplo" };
+
+    if (math_res >= 1000) {
+        display("Il risultato matematico e' grande: ", math_res);
+    } else {
+        display("Il risultato e' piccolo.");
+    }
+
+    display("Introspezione PI: ", type_of(pi), is_mut(pi));
+    display("Introspezione ID: ", sign_of(id_code), bit_size_of(id_code));
+    display("Identita' messaggio: ", identity_of(message));
+
+    #blocco_temporaneo {
+        let temp_var = 100;
+        message = "Modifica dentro il chunk";
+        display("Dentro il chunk:", temp_var, message);
+    }
+
+    display("Fuori dal chunk il messaggio ritorna originale:", message);
+}
