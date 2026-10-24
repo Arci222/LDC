@@ -1,0 +1,53 @@
+env {
+    target: "host";
+    ram: 4096;
+}
+
+capabilities {
+}
+
+identity {
+    name: "Array e cicli";
+}
+
+fn main {
+    let.mut.array[5].unsigned.16bit temperature = [18, 20, 22, 24, 26];
+    temperature[0] = 19;
+    display("Primo valore:", temperature[0], "Elementi:", length(temperature));
+    for (valore in temperature) {
+        display("Temperatura:", valore);
+    }
+
+    let.mut.array[? max 8].unsigned.16bit misure = [];
+    push(misure, 10);
+    push(misure, 12);
+    push(misure, 14);
+    display("Misure dinamiche:", length(misure), "ultimo:", pop(misure));
+
+    let.mut.32bit somma = 0;
+    for (i in 0..length(misure)) {
+        somma = somma + misure[i];
+    }
+    display("Somma:", somma);
+
+    let.mut.32bit selezione = 0;
+    for (n in 0..8) {
+        if (n == 2) {
+            continue;
+        }
+        if (n == 5) {
+            break;
+        }
+        selezione = selezione + n;
+    }
+    display("Somma con continue e break:", selezione);
+
+    let.mut.32bit contatore = 0;
+    while (contatore < 2) {
+        contatore = contatore + 1;
+    }
+    repeat {
+        contatore = contatore + 1;
+    } until (contatore >= 4);
+    display("Contatore:", contatore);
+}

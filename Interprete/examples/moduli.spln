@@ -1,0 +1,20 @@
+env {
+    target: "host";
+    ram: 4096;
+}
+
+capabilities {
+}
+
+identity {
+    name: "Include";
+}
+
+fn main {
+    include("moduli/sensori.spln");
+    let.const.32bit temperatura_locale = 99;
+
+    display("Temperatura nel modulo:", sensori.temperatura);
+    display("Rilevamento diretto:", sensori.rileva(2));
+    display("Variabile locale:", temperatura_locale);
+}

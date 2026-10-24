@@ -1,4 +1,4 @@
-use crate::ast::{BinaryOperator, Expression, Function, Identity, IdentityItem, IntrospectionKind, Literal, MetadataEntry, MetadataValue, Mutability, Parameter, Program, ScalarSuffix, Statement, UnaryOperator, VariableDeclaration, VariableType};
+use crate::ast::{BinaryOperator, EnumDefinition, EnumVariantDefinition, Expression, Function, Identity, IdentityItem, IntrospectionKind, Literal, MetadataEntry, MetadataValue, Mutability, Parameter, Program, ScalarSuffix, Statement, StructDefinition, StructField, SwitchCase, UnaryOperator, VariableDeclaration, VariableType};
 use std::str::FromStr;
 
 grammar;
@@ -6,14 +6,47 @@ grammar;
 pub Program: Program = {
     "env" "{" <environment:MetadataEntry*> "}"
     "capabilities" "{" <capabilities:MetadataEntry*> "}"
+    <structs:StructDefinition*>
+    <enums:EnumDefinition*>
     <identity:Identity>
     <top_functions:FunctionDefinition*>
     "fn" "main" "{" <main:Statement*> "}"
         => {
             let mut functions = identity.functions.clone();
             functions.extend(top_functions);
-            Program { environment, capabilities, identity, functions, main }
+            Program { environment, capabilities, identity, structs, enums, functions, main }
         }
+};
+
+StructDefinition: StructDefinition = {
+    "struct" <name:ID> "{" <fields:StructFieldList> "}" => StructDefinition { name, fields }
+};
+
+StructFieldList: Vec<StructField> = {
+    => vec![],
+    <first:StructField> <rest:("," <StructField>)*> => { let mut fields = vec![first]; fields.extend(rest); fields }
+};
+
+StructField: StructField = {
+    <name:ID> ":" "let" <spec:DeclarationSpec> => StructField { name, mutability: spec.0, ty: spec.1 }
+};
+
+EnumDefinition: EnumDefinition = {
+    "enum" <name:ID> "{" <variants:EnumVariantList> "}" => EnumDefinition { name, variants }
+};
+
+EnumVariantList: Vec<EnumVariantDefinition> = {
+    <first:EnumVariantDefinition> <rest:("," <EnumVariantDefinition>)*> => { let mut variants = vec![first]; variants.extend(rest); variants }
+};
+
+EnumVariantDefinition: EnumVariantDefinition = {
+    <name:ID> => EnumVariantDefinition { name, payload: vec![] },
+    <name:ID> "(" <payload:TypeList> ")" => EnumVariantDefinition { name, payload }
+};
+
+TypeList: Vec<VariableType> = {
+    => vec![],
+    <first:TypeSpec> <rest:("," <TypeSpec>)*> => { let mut types = vec![first]; types.extend(rest); types }
 };
 
 FunctionDefinition: Function = {
@@ -85,12 +118,40 @@ MetadataValues: Vec<MetadataValue> = {
 Statement: Statement = {
     <declaration:VariableDeclaration> => Statement::Variable(declaration),
     <name:ID> "=" <value:Expression> ";" => Statement::Assignment { name, value },
+    <name:ID> "[" <index:Expression> "]" "=" <value:Expression> ";" => Statement::IndexAssignment { name, index, value },
+    <base:ID> "." <field:ID> "=" <value:Expression> ";" => Statement::FieldAssignment { target: Expression::Field { value: Box::new(Expression::Variable(base)), name: field }, value },
+    <base:ID> "[" <index:Expression> "]" "." <field:ID> "=" <value:Expression> ";" => Statement::FieldAssignment { target: Expression::Field { value: Box::new(Expression::Index { array: Box::new(Expression::Variable(base)), index: Box::new(index) }), name: field }, value },
     "display" "(" <arguments:DisplayArguments> ")" ";" => Statement::Display(arguments),
     "return" <value:Expression?> ";" => Statement::Return(value),
     <expression:FunctionCall> ";" => Statement::Expression(expression),
     "if" "(" <condition:Expression> ")" "{" <then_branch:Statement*> "}" <else_branch:("else" "{" <Statement*> "}")?> =>
         Statement::If { condition, then_branch, else_branch },
+    "while" "(" <condition:Expression> ")" "{" <body:Statement*> "}" => Statement::While { condition, body },
+    "repeat" "{" <body:Statement*> "}" "until" "(" <condition:Expression> ")" ";" => Statement::RepeatUntil { body, condition },
+    "for" "(" <name:ID> "in" <start:Expression> ".." <end:Expression> ")" "{" <body:Statement*> "}" => Statement::ForRange { name, start, end, body },
+    "for" "(" <name:ID> "in" <collection:Expression> ")" "{" <body:Statement*> "}" => Statement::ForEach { name, collection, body },
+    <switch_statement:SwitchStatement> => switch_statement,
+    "break" ";" => Statement::Break,
+    "continue" ";" => Statement::Continue,
     "#" <name:ID> "{" <body:Statement*> "}" => Statement::Chunk { name, body },
+};
+
+SwitchStatement: Statement = {
+    "switch" "(" <expression:Expression> ")" "{" <cases:SwitchCase*> "default" ":" <default_body:Statement*> "}" => {
+        let mut cases = cases;
+        cases.push(SwitchCase { enum_name: None, variant: None, bindings: vec![], body: default_body });
+        Statement::Switch { expression, cases }
+    }
+};
+
+SwitchCase: SwitchCase = {
+    "case" <enum_name:ID> "::" <variant:ID> "(" <bindings:BindingList> ")" ":" <body:Statement*> => SwitchCase { enum_name: Some(enum_name), variant: Some(variant), bindings, body },
+    "case" <enum_name:ID> "::" <variant:ID> ":" <body:Statement*> => SwitchCase { enum_name: Some(enum_name), variant: Some(variant), bindings: vec![], body }
+};
+
+BindingList: Vec<String> = {
+    => vec![],
+    <first:ID> <rest:("," <ID>)*> => { let mut bindings = vec![first]; bindings.extend(rest); bindings }
 };
 
 VariableDeclaration: VariableDeclaration = {
@@ -185,7 +246,23 @@ Primary: Expression = {
     <if_expression:IfExpression> => if_expression,
     <call:FunctionCall> => call,
     "(" <expression:Expression> ")" => expression,
+    "[" <values:DisplayArguments> "]" => Expression::Array(values),
+    <name:ID> "::" "default" "(" ")" => Expression::DefaultStruct(name),
+    <name:ID> "::" <variant:ID> "(" <payload:DisplayArguments> ")" => Expression::EnumVariant { name, variant, payload },
+    <name:ID> "::" <variant:ID> => Expression::EnumVariant { name, variant, payload: vec![] },
+    <name:ID> "{" <fields:StructInitializerFields> "}" => Expression::StructLiteral { name, fields },
+    <value:Primary> "." <name:ID> => Expression::Field { value: Box::new(value), name },
+    <array:Primary> "[" <index:Expression> "]" => Expression::Index { array: Box::new(array), index: Box::new(index) },
     <name:ID> => Expression::Variable(name),
+};
+
+StructInitializerFields: Vec<(String, Expression)> = {
+    => vec![],
+    <first:StructInitializerField> <rest:("," <StructInitializerField>)*> => { let mut fields = vec![first]; fields.extend(rest); fields }
+};
+
+StructInitializerField: (String, Expression) = {
+    <name:ID> ":" <value:Expression> => (name, value)
 };
 
 FunctionCall: Expression = {
@@ -221,6 +298,7 @@ TypeSpec: VariableType = {
         Some(ScalarSuffix::Bool) => VariableType::Bool,
         None => VariableType::Integer { bits, unsigned: sign.is_some() },
     },
+    <name:ID> => VariableType::Named(name),
 };
 
 DeclarationSpec: (Mutability, VariableType) = {
@@ -233,6 +311,27 @@ DeclarationSpec: (Mutability, VariableType) = {
             Some(ScalarSuffix::Bool) => (mutability, VariableType::Bool),
             None => (mutability, VariableType::Integer { bits, unsigned: unsigned.is_some() }),
         }
+    , "." <mutability:Mutability> "." "array" "[" <capacity:r"[0-9]+"> "]" <unsigned:("." "unsigned")?> "." <bits:BitWidth> <suffix:("." <ScalarSuffix>)?> => {
+        let element = match suffix {
+            Some(ScalarSuffix::Float) => VariableType::Float { bits },
+            Some(ScalarSuffix::String) => VariableType::String { bits },
+            Some(ScalarSuffix::Bool) => VariableType::Bool,
+            None => VariableType::Integer { bits, unsigned: unsigned.is_some() },
+        };
+        (mutability, VariableType::Array { element: Box::new(element), capacity: usize::from_str(capacity).unwrap(), dynamic: false })
+    }
+    , "." <mutability:Mutability> "." "array" "[" "?" "max" <capacity:r"[0-9]+"> "]" <unsigned:("." "unsigned")?> "." <bits:BitWidth> <suffix:("." <ScalarSuffix>)?> => {
+        let element = match suffix {
+            Some(ScalarSuffix::Float) => VariableType::Float { bits },
+            Some(ScalarSuffix::String) => VariableType::String { bits },
+            Some(ScalarSuffix::Bool) => VariableType::Bool,
+            None => VariableType::Integer { bits, unsigned: unsigned.is_some() },
+        };
+        (mutability, VariableType::Array { element: Box::new(element), capacity: usize::from_str(capacity).unwrap(), dynamic: true })
+    }
+    , "." <mutability:Mutability> "." "array" "[" <capacity:r"[0-9]+"> "]" "." <name:ID> => (mutability, VariableType::Array { element: Box::new(VariableType::Named(name)), capacity: usize::from_str(capacity).unwrap(), dynamic: false })
+    , "." <mutability:Mutability> "." "array" "[" "?" "max" <capacity:r"[0-9]+"> "]" "." <name:ID> => (mutability, VariableType::Array { element: Box::new(VariableType::Named(name)), capacity: usize::from_str(capacity).unwrap(), dynamic: true })
+    , "." <mutability:Mutability> "." <name:ID> => (mutability, VariableType::Named(name))
 };
 
 Mutability: Mutability = {

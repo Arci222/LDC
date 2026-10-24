@@ -1,0 +1,65 @@
+env {
+    target: "host";
+    ram: 4096;
+}
+
+capabilities {
+}
+
+struct Lettura {
+    valore: let.mut.32bit,
+    nome: let.const.16bit.string
+}
+
+enum Collegamento {
+    Nodo(32bit),
+    Messaggio(32bit, string),
+    Fine
+}
+
+identity {
+    name: "Struct ed enum";
+}
+
+fn main {
+    let.mut.Lettura sensore = Lettura { valore: 21, nome: "temperatura" };
+    display(sensore.nome, sensore.valore);
+
+    sensore.valore = sensore.valore + 1;
+    display("Aggiornato:", sensore.valore);
+    display("");
+    let.const.Lettura sensore_predefinito = Lettura::default();
+    display("Valore predefinito:", sensore_predefinito.valore);
+    display("");
+    let.const.array[2].Lettura storico = Lettura::default();
+    storico[1].valore = 9;
+    display("Elementi nello storico:", length(storico), storico[1].valore);
+
+    let.mut.array[? max 3].Lettura recenti = [];
+    push(recenti, sensore);
+    display("Array dinamico di struct:", recenti[0].nome);
+    display("");
+    let.mut.Collegamento cursore = Collegamento::Nodo(3);
+    switch (cursore) {
+        case Collegamento::Nodo(indice):
+            display("Indice nodo:", indice);
+            break;
+        case Collegamento::Fine:
+            display("Lista finita");
+            break;
+        default:
+            display("Variante non prevista");
+            break;
+    }
+    display("Cursor attivo:", cursore != Collegamento::Fine);
+    display("");
+    let.mut.Collegamento messaggio = Collegamento::Messaggio(7, "pronto");
+    switch (messaggio) {
+        case Collegamento::Messaggio(codice, testo):
+            display("Risposta:", codice, testo);
+            break;
+        default:
+            display("Nessun messaggio");
+            break;
+    }
+}

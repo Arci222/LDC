@@ -1,0 +1,5 @@
+fn rileva(a: 32bit) -> 32bit {
+    return a * 2;
+}
+
+let.const.32bit temperatura = rileva(21);

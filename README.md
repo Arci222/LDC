@@ -1,6 +1,6 @@
 # LDC v.0.5.0
 
-**Laplace Demon code**
+**Laplace Demon Code**
 
 ## Cos'è
 
@@ -13,18 +13,89 @@ L'ho iniziato con l'obiettivo di creare un'alternativa a C e MicroPython più se
 * Ridurre l'utilizzo della RAM tramite il chunking automatico
 * Semplificare la comunicazione tra più microcontrollori
 * Separare la logica dalle regole di sicurezza
-* Introdurre nuovi costrutti per i cicli
-* Sfruttare al massimo hardware come teensy 4.x e arduino UNO
+* Supportare array fissi e dinamici con capacità massima
+* Sfruttare hardware come Teensy 4.x e Arduino Uno
 
 ## Stato
 
-* Parser
-* AST
+* Parser, AST e analisi semantica
 * Interprete
-* Linguaggio in sviluppo
-* codegen C
+* Generazione di codice C
+* Array fissi e dinamici (`push`, `pop`, `length`)
+* Cicli `for`, `while` e `repeat ... until`, con `break` e `continue`
+* `struct`, `enum`, `switch` e `include()` di file sorgente
+
+## Comandi `ldc`
+
+| Comando | Azione |
+|---|---|
+| `ldc file.spln` | Genera il C in `ldc-output` accanto al sorgente |
+| `ldc --run file.spln` | Esegue il programma nell'interprete |
+| `ldc --emit-c file.spln` | Scrive il C su stdout |
+| `ldc --build file.spln` | Genera il C e compila l'eseguibile |
+| `ldc --exec file.spln` | Genera, compila ed esegue |
+
+## Roadmap
+
+- [x] Parser, AST e interprete
+- [x] Generazione C
+- [x] Array fissi e dinamici
+- [x] Cicli e controllo del flusso
+- [x] Struct, enum e moduli sorgente con `include()`
+- [ ] Import e risoluzione versionata di block/librerie
+- [ ] Libreria standard e backend embedded
+
+## Esempio: array e cicli
+
+```spln
+fn main {
+    let.mut.array[? max 8].unsigned.16bit misure = [];
+    push(misure, 10);
+    push(misure, 12);
+
+    let.mut.32bit somma = 0;
+    for (i in 0..length(misure)) {
+        somma = somma + misure[i];
+    }
+    display("Somma:", somma);
+}
+```
+
+L'esempio completo, con entrambi i tipi di array e tutti i cicli, è in `Interprete/examples/array_cicli.spln`. Puoi provarlo con l'interprete:
+
+```sh
+ldc --run "Interprete/examples/array_cicli.spln"
+```
+
+Per generare e compilare il C:
+
+```sh
+ldc --build "Interprete/examples/array_cicli.spln"
+```
 
 LDC è un progetto sperimentale e la sintassi può cambiare.
+
+## Struct, enum e moduli
+
+Il compilatore supporta struct con campi tipizzati, `Nome::default()`, enum con payload e `switch` con `default`. Gli include sono risolti rispetto alla cartella del progetto; variabili e funzioni incluse si usano con il namespace automatico ricavato dal nome del file.
+
+```spln
+struct Lettura { valore: let.mut.32bit }
+enum Stato { Valido(32bit), Vuoto }
+
+fn main {
+    include("sensori.spln");
+    let.mut.Lettura dato = Lettura { valore: sensori.temperatura };
+    display(dato.valore);
+}
+```
+
+Esempi eseguibili:
+
+```sh
+ldc --exec "Interprete/examples/struct_enum.spln"
+ldc --run "Interprete/examples/moduli.spln"
+```
 
 ## Installazione e primo utilizzo
 

@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     env,
     ffi::{OsStr, OsString},
     fs,
@@ -141,6 +142,28 @@ fn load_program(source_path: &Path) -> Result<ast::Program, String> {
             absolute_path.display()
         )
     })?;
+    let project_directory = absolute_path.parent().ok_or_else(|| {
+        format!(
+            "non trovo la cartella del progetto per '{}': impossibile risolvere include",
+            absolute_path.display()
+        )
+    })?;
+    let mut hoisted_functions = Vec::new();
+    let mut modules = HashMap::new();
+    let source = expand_includes(
+        &absolute_path,
+        project_directory,
+        &source,
+        &mut vec![absolute_path.clone()],
+        &mut hoisted_functions,
+        &mut modules,
+    )?;
+    let source = rewrite_identifiers(&source, &HashMap::new(), &modules);
+    let hoisted_functions = hoisted_functions
+        .iter()
+        .map(|function| rewrite_identifiers(function, &HashMap::new(), &modules))
+        .collect::<Vec<_>>();
+    let source = insert_functions_before_main(source, &hoisted_functions)?;
     parser::ProgramParser::new()
         .parse(&source)
         .map_err(|error| {
@@ -149,6 +172,478 @@ fn load_program(source_path: &Path) -> Result<ast::Program, String> {
                 absolute_path.display()
             )
         })
+}
+
+fn expand_includes(
+    source_path: &Path,
+    project_directory: &Path,
+    source: &str,
+    stack: &mut Vec<PathBuf>,
+    hoisted_functions: &mut Vec<String>,
+    all_modules: &mut HashMap<String, Vec<String>>,
+) -> Result<String, String> {
+    let mut expanded = String::with_capacity(source.len());
+    let mut modules: HashMap<String, Vec<String>> = HashMap::new();
+    let mut cursor = 0;
+    while let Some((start, end, include_path)) = find_include(source, cursor) {
+        expanded.push_str(&source[cursor..start]);
+        let included_path =
+            fs::canonicalize(project_directory.join(&include_path)).map_err(|error| {
+                format!(
+                    "include '{}' da '{}': {error}",
+                    include_path,
+                    source_path.display()
+                )
+            })?;
+        if stack.contains(&included_path) {
+            let chain = stack
+                .iter()
+                .chain(std::iter::once(&included_path))
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" -> ");
+            return Err(format!("ciclo negli include: {chain}"));
+        }
+        let included_source = fs::read_to_string(&included_path).map_err(|error| {
+            format!(
+                "non riesco a leggere l'include '{}': {error}",
+                included_path.display()
+            )
+        })?;
+        stack.push(included_path.clone());
+        let recursively_expanded = expand_includes(
+            &included_path,
+            project_directory,
+            &included_source,
+            stack,
+            hoisted_functions,
+            all_modules,
+        )?;
+        stack.pop();
+        let module_name = included_path
+            .file_stem()
+            .and_then(OsStr::to_str)
+            .unwrap_or("module")
+            .to_string();
+        let (module_body, functions) = extract_module_functions(&recursively_expanded);
+        let mut names = declared_names(&module_body);
+        names.extend(functions.iter().map(|(name, _)| name.clone()));
+        names.sort();
+        names.dedup();
+        let renamed = names
+            .iter()
+            .map(|name| (name.clone(), format!("{module_name}__{name}")))
+            .collect::<HashMap<_, _>>();
+        modules.insert(module_name.clone(), names.clone());
+        all_modules.insert(module_name, names);
+        for (_, function_source) in functions {
+            hoisted_functions.push(rewrite_identifiers(
+                &function_source,
+                &renamed,
+                &HashMap::new(),
+            ));
+        }
+        expanded.push_str(&rewrite_identifiers(
+            &module_body,
+            &renamed,
+            &HashMap::new(),
+        ));
+        cursor = end;
+    }
+    expanded.push_str(&source[cursor..]);
+    Ok(rewrite_identifiers(&expanded, &HashMap::new(), &modules))
+}
+
+fn insert_functions_before_main(
+    mut source: String,
+    functions: &[String],
+) -> Result<String, String> {
+    if functions.is_empty() {
+        return Ok(source);
+    }
+    let main_start = source.find("fn main").ok_or_else(|| {
+        "fn main non trovato durante l'inserimento delle funzioni incluse".to_string()
+    })?;
+    let prelude = format!("{}\n", functions.join("\n"));
+    source.insert_str(main_start, &prelude);
+    Ok(source)
+}
+
+fn extract_module_functions(source: &str) -> (String, Vec<(String, String)>) {
+    let bytes = source.as_bytes();
+    let mut body = String::with_capacity(source.len());
+    let mut functions = Vec::new();
+    let mut cursor = 0;
+    let mut index = 0;
+    let mut brace_depth = 0usize;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            index = source[index..]
+                .find('\n')
+                .map_or(bytes.len(), |n| index + n + 1);
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            index = source[index + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |n| index + n + 4);
+            continue;
+        }
+        if bytes[index] == b'"' {
+            index = skip_string(bytes, index);
+            continue;
+        }
+        if brace_depth == 0 && bytes[index..].starts_with(b"fn") {
+            let prev_is_id =
+                index > 0 && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_');
+            let after_fn = index + 2;
+            let next_is_id = after_fn < bytes.len()
+                && (bytes[after_fn].is_ascii_alphanumeric() || bytes[after_fn] == b'_');
+            if !prev_is_id && !next_is_id {
+                let mut name_start = after_fn;
+                while name_start < bytes.len() && bytes[name_start].is_ascii_whitespace() {
+                    name_start += 1;
+                }
+                let mut name_end = name_start;
+                while name_end < bytes.len()
+                    && (bytes[name_end].is_ascii_alphanumeric() || bytes[name_end] == b'_')
+                {
+                    name_end += 1;
+                }
+                let name = source[name_start..name_end].to_string();
+                let mut open = name_end;
+                while open < bytes.len() && bytes[open] != b'{' {
+                    if bytes[open] == b'"' {
+                        open = skip_string(bytes, open);
+                    } else {
+                        open += 1;
+                    }
+                }
+                if open < bytes.len() {
+                    if let Some(close) = matching_brace(bytes, open) {
+                        body.push_str(&source[cursor..index]);
+                        functions.push((name, source[index..=close].to_string()));
+                        cursor = close + 1;
+                        index = close + 1;
+                        continue;
+                    }
+                }
+            }
+        }
+        match bytes[index] {
+            b'{' => brace_depth += 1,
+            b'}' => brace_depth = brace_depth.saturating_sub(1),
+            _ => {}
+        }
+        index += 1;
+    }
+    body.push_str(&source[cursor..]);
+    (body, functions)
+}
+
+fn skip_string(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'"' && bytes[index - 1] != b'\\' {
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn matching_brace(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            index = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |n| index + n + 1);
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            index = bytes[index + 2..]
+                .windows(2)
+                .position(|pair| pair == b"*/")
+                .map_or(bytes.len(), |n| index + n + 4);
+            continue;
+        }
+        if bytes[index] == b'"' {
+            index = skip_string(bytes, index);
+            continue;
+        }
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn declared_names(source: &str) -> Vec<String> {
+    let tokens = code_tokens(source);
+    let mut names = Vec::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if token != "let" {
+            continue;
+        }
+        let mut last_identifier = None;
+        for candidate in tokens.iter().skip(index + 1) {
+            if candidate == ";" {
+                break;
+            }
+            if candidate == "=" {
+                if let Some(name) = last_identifier {
+                    names.push(name);
+                }
+                break;
+            }
+            if is_identifier(candidate) {
+                last_identifier = Some(candidate.clone());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn code_tokens(source: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            index = source[index..]
+                .find('\n')
+                .map_or(bytes.len(), |n| index + n + 1);
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            index = source[index + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |n| index + n + 4);
+            continue;
+        }
+        if bytes[index] == b'"' {
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'"' && bytes[index - 1] != b'\\' {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            continue;
+        }
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            tokens.push(source[start..index].to_string());
+            continue;
+        }
+        if bytes[index] == b'=' || bytes[index] == b';' {
+            tokens.push((bytes[index] as char).to_string());
+        }
+        index += 1;
+    }
+    tokens
+}
+
+fn is_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn rewrite_identifiers(
+    source: &str,
+    names: &HashMap<String, String>,
+    modules: &HashMap<String, Vec<String>>,
+) -> String {
+    let bytes = source.as_bytes();
+    let mut result = String::with_capacity(source.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index..].starts_with(b"//") {
+            let end = source[index..]
+                .find('\n')
+                .map_or(bytes.len(), |n| index + n + 1);
+            result.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            let end = source[index + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |n| index + n + 4);
+            result.push_str(&source[index..end]);
+            index = end;
+            continue;
+        }
+        if bytes[index] == b'"' {
+            let start = index;
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'"' && bytes[index - 1] != b'\\' {
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            result.push_str(&source[start..index]);
+            continue;
+        }
+        if bytes[index].is_ascii_alphabetic() || bytes[index] == b'_' {
+            let start = index;
+            index += 1;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+            {
+                index += 1;
+            }
+            let identifier = &source[start..index];
+            let mut dot = index;
+            while dot < bytes.len() && bytes[dot].is_ascii_whitespace() {
+                dot += 1;
+            }
+            if dot < bytes.len() && bytes[dot] == b'.' {
+                let next_start = dot + 1;
+                let mut next_end = next_start;
+                while next_end < bytes.len() && bytes[next_end].is_ascii_whitespace() {
+                    next_end += 1;
+                }
+                let name_start = next_end;
+                if name_start < bytes.len()
+                    && (bytes[name_start].is_ascii_alphabetic() || bytes[name_start] == b'_')
+                {
+                    let mut name_end = name_start + 1;
+                    while name_end < bytes.len()
+                        && (bytes[name_end].is_ascii_alphanumeric() || bytes[name_end] == b'_')
+                    {
+                        name_end += 1;
+                    }
+                    if modules.get(identifier).is_some_and(|declared| {
+                        declared
+                            .iter()
+                            .any(|name| name == &source[name_start..name_end])
+                    }) {
+                        result.push_str(identifier);
+                        result.push_str("__");
+                        result.push_str(&source[name_start..name_end]);
+                        index = name_end;
+                        continue;
+                    }
+                }
+            }
+            result.push_str(
+                names
+                    .get(identifier)
+                    .map(String::as_str)
+                    .unwrap_or(identifier),
+            );
+            continue;
+        }
+        let char_len = source[index..]
+            .chars()
+            .next()
+            .map(char::len_utf8)
+            .unwrap_or(1);
+        result.push_str(&source[index..index + char_len]);
+        index += char_len;
+    }
+    result
+}
+
+fn find_include(source: &str, from: usize) -> Option<(usize, usize, String)> {
+    let bytes = source.as_bytes();
+    let mut index = from;
+    let mut in_string = false;
+    while index < bytes.len() {
+        if !in_string && bytes[index..].starts_with(b"//") {
+            index = source[index..]
+                .find('\n')
+                .map_or(bytes.len(), |offset| index + offset + 1);
+            continue;
+        }
+        if !in_string && bytes[index..].starts_with(b"/*") {
+            index = source[index + 2..]
+                .find("*/")
+                .map_or(bytes.len(), |offset| index + 2 + offset + 2);
+            continue;
+        }
+        if bytes[index] == b'"' && (index == 0 || bytes[index - 1] != b'\\') {
+            in_string = !in_string;
+            index += 1;
+            continue;
+        }
+        if !in_string && bytes[index..].starts_with(b"include") {
+            let previous_is_id =
+                index > 0 && (bytes[index - 1].is_ascii_alphanumeric() || bytes[index - 1] == b'_');
+            let mut end = index + "include".len();
+            if previous_is_id {
+                index += 1;
+                continue;
+            }
+            while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            if end == bytes.len() || bytes[end] != b'(' {
+                index += 1;
+                continue;
+            }
+            end += 1;
+            while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            if end == bytes.len() || bytes[end] != b'"' {
+                index += 1;
+                continue;
+            }
+            let path_start = end + 1;
+            end = path_start;
+            while end < bytes.len() && bytes[end] != b'"' {
+                end += 1;
+            }
+            if end == bytes.len() {
+                return None;
+            }
+            let include_path = source[path_start..end].to_string();
+            end += 1;
+            while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            if end == bytes.len() || bytes[end] != b')' {
+                index += 1;
+                continue;
+            }
+            end += 1;
+            while end < bytes.len() && bytes[end].is_ascii_whitespace() {
+                end += 1;
+            }
+            if end == bytes.len() || bytes[end] != b';' {
+                index += 1;
+                continue;
+            }
+            return Some((index, end + 1, include_path));
+        }
+        index += 1;
+    }
+    None
 }
 
 fn run_interpreter(program: ast::Program, source_path: &Path) -> Result<ExitCode, String> {

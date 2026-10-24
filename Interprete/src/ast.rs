@@ -5,8 +5,43 @@ pub struct Program {
     pub environment: Vec<MetadataEntry>,
     pub capabilities: Vec<MetadataEntry>,
     pub identity: Identity,
+    pub structs: Vec<StructDefinition>,
+    pub enums: Vec<EnumDefinition>,
     pub functions: Vec<Function>,
     pub main: Vec<Statement>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructDefinition {
+    pub name: String,
+    pub fields: Vec<StructField>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StructField {
+    pub name: String,
+    pub mutability: Mutability,
+    pub ty: VariableType,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumDefinition {
+    pub name: String,
+    pub variants: Vec<EnumVariantDefinition>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumVariantDefinition {
+    pub name: String,
+    pub payload: Vec<VariableType>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SwitchCase {
+    pub enum_name: Option<String>,
+    pub variant: Option<String>,
+    pub bindings: Vec<String>,
+    pub body: Vec<Statement>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +91,15 @@ pub enum Statement {
         name: String,
         value: Expression,
     },
+    IndexAssignment {
+        name: String,
+        index: Expression,
+        value: Expression,
+    },
+    FieldAssignment {
+        target: Expression,
+        value: Expression,
+    },
     Display(Vec<Expression>),
     Expression(Expression),
     Return(Option<Expression>),
@@ -64,6 +108,31 @@ pub enum Statement {
         then_branch: Vec<Statement>,
         else_branch: Option<Vec<Statement>>,
     },
+    While {
+        condition: Expression,
+        body: Vec<Statement>,
+    },
+    RepeatUntil {
+        body: Vec<Statement>,
+        condition: Expression,
+    },
+    ForRange {
+        name: String,
+        start: Expression,
+        end: Expression,
+        body: Vec<Statement>,
+    },
+    ForEach {
+        name: String,
+        collection: Expression,
+        body: Vec<Statement>,
+    },
+    Switch {
+        expression: Expression,
+        cases: Vec<SwitchCase>,
+    },
+    Break,
+    Continue,
     Chunk {
         name: String,
         body: Vec<Statement>,
@@ -87,10 +156,25 @@ pub enum Mutability {
 #[derive(Debug, Clone)]
 pub enum VariableType {
     Inferred,
-    Integer { bits: u8, unsigned: bool },
-    Float { bits: u8 },
-    String { bits: u8 },
+    Integer {
+        bits: u8,
+        unsigned: bool,
+    },
+    Float {
+        bits: u8,
+    },
+    String {
+        bits: u8,
+    },
     Bool,
+    Array {
+        element: Box<VariableType>,
+        capacity: usize,
+        dynamic: bool,
+    },
+    Struct(String),
+    Enum(String),
+    Named(String),
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +190,16 @@ pub enum Literal {
     Float(f64),
     String(String),
     Bool(bool),
+    Array(Vec<Literal>),
+    Struct {
+        name: String,
+        fields: Vec<(String, Literal, Mutability)>,
+    },
+    Enum {
+        name: String,
+        variant: String,
+        payload: Vec<Literal>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +227,25 @@ pub enum Expression {
         condition: Box<Expression>,
         then_value: Box<Expression>,
         else_value: Box<Expression>,
+    },
+    Array(Vec<Expression>),
+    Index {
+        array: Box<Expression>,
+        index: Box<Expression>,
+    },
+    StructLiteral {
+        name: String,
+        fields: Vec<(String, Expression)>,
+    },
+    EnumVariant {
+        name: String,
+        variant: String,
+        payload: Vec<Expression>,
+    },
+    DefaultStruct(String),
+    Field {
+        value: Box<Expression>,
+        name: String,
     },
 }
 
@@ -187,9 +300,16 @@ struct Scope {
     frames: Vec<HashMap<String, RuntimeVariable>>,
 }
 
+struct TypeRegistry<'a> {
+    structs: &'a [StructDefinition],
+    enums: &'a [EnumDefinition],
+}
+
 enum ExecutionFlow {
     Continue,
     Return(Option<Literal>),
+    Break,
+    LoopContinue,
 }
 
 impl Scope {
@@ -208,8 +328,25 @@ impl Scope {
     }
 
     fn declare(&mut self, declaration: &VariableDeclaration, value: Literal) -> Result<(), String> {
+        let value = normalize_array_value(&declaration.ty, value)?;
         declaration.validate_value(&value)?;
-        let frame = self.frames.last_mut().expect("uno scope ha sempre un frame");
+        let ty = match (&declaration.ty, &value) {
+            (VariableType::Inferred, Literal::Array(values)) => VariableType::Array {
+                element: Box::new(
+                    values
+                        .first()
+                        .map(infer_literal_type)
+                        .unwrap_or(VariableType::Inferred),
+                ),
+                capacity: values.len(),
+                dynamic: false,
+            },
+            _ => declaration.ty.clone(),
+        };
+        let frame = self
+            .frames
+            .last_mut()
+            .expect("uno scope ha sempre un frame");
         if frame.contains_key(&declaration.name) {
             return Err(format!(
                 "la variabile '{}' e' gia' stata dichiarata in questo scope",
@@ -220,7 +357,7 @@ impl Scope {
             declaration.name.clone(),
             RuntimeVariable {
                 mutability: declaration.mutability,
-                ty: declaration.ty.clone(),
+                ty,
                 value,
             },
         );
@@ -242,23 +379,106 @@ impl Scope {
     }
 }
 
+fn normalize_array_value(ty: &VariableType, value: Literal) -> Result<Literal, String> {
+    let VariableType::Array {
+        element,
+        capacity,
+        dynamic: false,
+    } = ty
+    else {
+        return Ok(value);
+    };
+    let Literal::Array(values) = &value else {
+        if matches!(element.as_ref(), VariableType::Named(name) if matches!(&value, Literal::Struct { name: value_name, .. } if name == value_name))
+        {
+            return Ok(Literal::Array(vec![value; *capacity]));
+        }
+        if is_zero_literal(&value) {
+            return Ok(Literal::Array(
+                (0..*capacity).map(|_| zero_literal(element)).collect(),
+            ));
+        }
+        return Ok(value);
+    };
+    if values.is_empty() {
+        return Ok(Literal::Array(
+            (0..*capacity).map(|_| zero_literal(element)).collect(),
+        ));
+    }
+    Ok(value)
+}
+
+fn is_zero_literal(value: &Literal) -> bool {
+    match value {
+        Literal::Integer(value) => *value == 0,
+        Literal::Float(value) => *value == 0.0,
+        Literal::String(value) => value.is_empty(),
+        Literal::Bool(value) => !value,
+        _ => false,
+    }
+}
+
+fn zero_literal(ty: &VariableType) -> Literal {
+    match ty {
+        VariableType::Float { .. } => Literal::Float(0.0),
+        VariableType::String { .. } => Literal::String(String::new()),
+        VariableType::Bool => Literal::Bool(false),
+        _ => Literal::Integer(0),
+    }
+}
+
+fn infer_literal_type(value: &Literal) -> VariableType {
+    match value {
+        Literal::Integer(_) => VariableType::Integer {
+            bits: 32,
+            unsigned: false,
+        },
+        Literal::Float(_) => VariableType::Float { bits: 32 },
+        Literal::String(_) => VariableType::String { bits: 16 },
+        Literal::Bool(_) => VariableType::Bool,
+        Literal::Array(values) => VariableType::Array {
+            element: Box::new(
+                values
+                    .first()
+                    .map(infer_literal_type)
+                    .unwrap_or(VariableType::Inferred),
+            ),
+            capacity: values.len(),
+            dynamic: false,
+        },
+        Literal::Struct { name, .. } | Literal::Enum { name, .. } => {
+            VariableType::Named(name.clone())
+        }
+    }
+}
+
 impl Program {
     pub fn run(&self) -> Result<Vec<String>, String> {
+        let types = TypeRegistry {
+            structs: &self.structs,
+            enums: &self.enums,
+        };
         let mut scope = Scope::new();
         let mut output = Vec::new();
 
         for declaration in &self.identity.variables {
-            let value = declaration.value.evaluate(&mut scope, &self.functions, &mut output)?;
+            let value =
+                declaration
+                    .value
+                    .evaluate(&mut scope, &self.functions, &types, &mut output)?;
             scope.declare(declaration, value)?;
         }
 
         // Le variabili top-level di fn main hanno il loro scope persistente.
         scope.push_frame();
-        if matches!(
-            execute_statements(&self.main, &mut scope, &mut output, &self.functions)?,
-            ExecutionFlow::Return(_)
-        ) {
-            return Err("return puo' essere usato solo dentro una funzione".to_string());
+        match execute_statements(&self.main, &mut scope, &mut output, &self.functions, &types)? {
+            ExecutionFlow::Return(_) => {
+                return Err("return puo' essere usato solo dentro una funzione".to_string());
+            }
+            ExecutionFlow::Break | ExecutionFlow::LoopContinue => {
+                return Err("break/continue fuori da un ciclo".to_string());
+            }
+            ExecutionFlow::Continue => {}
         }
 
         Ok(output)
@@ -270,11 +490,14 @@ fn execute_statements(
     scope: &mut Scope,
     output: &mut Vec<String>,
     functions: &[Function],
+    types: &TypeRegistry<'_>,
 ) -> Result<ExecutionFlow, String> {
     for statement in statements {
         match statement {
             Statement::Variable(declaration) => {
-                let value = declaration.value.evaluate(scope, functions, output)?;
+                let value = declaration
+                    .value
+                    .evaluate(scope, functions, types, output)?;
                 scope.declare(declaration, value)?;
             }
             Statement::Assignment { name, value } => {
@@ -285,28 +508,67 @@ fn execute_statements(
                 if variable.mutability == Mutability::Constant {
                     return Err(format!("non puoi assegnare a '{name}': e' una let.const"));
                 }
-                let value = value.evaluate(scope, functions, output)?;
+                let value = value.evaluate(scope, functions, types, output)?;
                 variable.ty.validate_value_named(name, &value)?;
                 scope.assign(name, value)?;
+            }
+            Statement::IndexAssignment { name, index, value } => {
+                let current = scope
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| format!("la variabile '{name}' non e' stata dichiarata"))?;
+                if current.mutability == Mutability::Constant {
+                    return Err(format!("non puoi modificare '{name}': e' una let.const"));
+                }
+                let index = index
+                    .evaluate(scope, functions, types, output)?
+                    .as_integer("indice array")?;
+                let index =
+                    usize::try_from(index).map_err(|_| "indice array negativo".to_string())?;
+                let value = value.evaluate(scope, functions, types, output)?;
+                let mut array = match current.value {
+                    Literal::Array(values) => values,
+                    _ => return Err(format!("'{name}' non e' un array")),
+                };
+                let slot = array.get_mut(index).ok_or_else(|| {
+                    format!("indice {index} fuori dai limiti dell'array '{name}'")
+                })?;
+                match &current.ty {
+                    VariableType::Array { element, .. } => {
+                        element.validate_value_named(name, &value)?
+                    }
+                    _ => return Err(format!("'{name}' non e' un array")),
+                }
+                *slot = value;
+                scope.assign(name, Literal::Array(array))?;
+            }
+            Statement::FieldAssignment { target, value } => {
+                assign_field(target, value, scope, functions, types, output)?;
             }
             Statement::Display(expressions) => {
                 let values = expressions
                     .iter()
-                    .map(|expression| expression.evaluate(scope, functions, output).map(|value| value.display()))
+                    .map(|expression| {
+                        expression
+                            .evaluate(scope, functions, types, output)
+                            .map(|value| value.display())
+                    })
                     .collect::<Result<Vec<_>, _>>()?;
                 output.push(values.join(" "));
             }
             Statement::Expression(expression) => {
                 if let Expression::Call { name, arguments } = expression {
-                    invoke_function(name, arguments, scope, output, functions)?;
+                    invoke_function(name, arguments, scope, output, functions, types)?;
                 } else {
-                    return Err("come istruzione e' ammessa solo una chiamata di funzione".to_string());
+                    return Err(
+                        "come istruzione e' ammessa solo una chiamata di funzione".to_string()
+                    );
                 }
             }
             Statement::Return(expression) => {
                 let value = expression
                     .as_ref()
-                    .map(|expression| expression.evaluate(scope, functions, output))
+                    .map(|expression| expression.evaluate(scope, functions, types, output))
                     .transpose()?;
                 return Ok(ExecutionFlow::Return(value));
             }
@@ -315,7 +577,9 @@ fn execute_statements(
                 then_branch,
                 else_branch,
             } => {
-                let condition = condition.evaluate(scope, functions, output)?.as_bool("la condizione di if")?;
+                let condition = condition
+                    .evaluate(scope, functions, types, output)?
+                    .as_bool("la condizione di if")?;
                 let branch = if condition {
                     Some(then_branch)
                 } else {
@@ -325,27 +589,287 @@ fn execute_statements(
                     // Un blocco if ha scope lessicale proprio; le assegnazioni alle
                     // variabili esterne restano invece visibili dopo il blocco.
                     scope.push_frame();
-                    let result = execute_statements(branch, scope, output, functions);
+                    let result = execute_statements(branch, scope, output, functions, types);
                     scope.pop_frame();
-                    if let ExecutionFlow::Return(value) = result? {
-                        return Ok(ExecutionFlow::Return(value));
+                    match result? {
+                        ExecutionFlow::Continue => {}
+                        flow => return Ok(flow),
                     }
                 }
             }
+            Statement::While { condition, body } => loop {
+                if !condition
+                    .evaluate(scope, functions, types, output)?
+                    .as_bool("la condizione di while")?
+                {
+                    break;
+                }
+                scope.push_frame();
+                let result = execute_statements(body, scope, output, functions, types);
+                scope.pop_frame();
+                match result? {
+                    ExecutionFlow::Continue | ExecutionFlow::LoopContinue => continue,
+                    ExecutionFlow::Break => break,
+                    flow @ ExecutionFlow::Return(_) => return Ok(flow),
+                }
+            },
+            Statement::RepeatUntil { body, condition } => loop {
+                scope.push_frame();
+                let result = execute_statements(body, scope, output, functions, types);
+                scope.pop_frame();
+                match result? {
+                    ExecutionFlow::Break => break,
+                    ExecutionFlow::Continue | ExecutionFlow::LoopContinue => {}
+                    flow @ ExecutionFlow::Return(_) => return Ok(flow),
+                }
+                if condition
+                    .evaluate(scope, functions, types, output)?
+                    .as_bool("la condizione di until")?
+                {
+                    break;
+                }
+            },
+            Statement::ForRange {
+                name,
+                start,
+                end,
+                body,
+            } => {
+                let mut index = start
+                    .evaluate(scope, functions, types, output)?
+                    .as_integer("inizio range")?;
+                let end = end
+                    .evaluate(scope, functions, types, output)?
+                    .as_integer("fine range")?;
+                while index < end {
+                    scope.push_frame();
+                    scope.declare(
+                        &VariableDeclaration {
+                            name: name.clone(),
+                            mutability: Mutability::Constant,
+                            ty: VariableType::Inferred,
+                            value: Expression::Literal(Literal::Integer(index)),
+                        },
+                        Literal::Integer(index),
+                    )?;
+                    let result = execute_statements(body, scope, output, functions, types);
+                    scope.pop_frame();
+                    match result? {
+                        ExecutionFlow::Break => break,
+                        ExecutionFlow::Continue | ExecutionFlow::LoopContinue => {}
+                        flow @ ExecutionFlow::Return(_) => return Ok(flow),
+                    }
+                    index = index
+                        .checked_add(1)
+                        .ok_or_else(|| "overflow nel contatore di for".to_string())?;
+                }
+            }
+            Statement::ForEach {
+                name,
+                collection,
+                body,
+            } => {
+                let values = match collection.evaluate(scope, functions, types, output)? {
+                    Literal::Array(values) => values,
+                    _ => return Err("for-in richiede un array".to_string()),
+                };
+                for value in values {
+                    scope.push_frame();
+                    scope.declare(
+                        &VariableDeclaration {
+                            name: name.clone(),
+                            mutability: Mutability::Constant,
+                            ty: infer_literal_type(&value),
+                            value: Expression::Literal(value.clone()),
+                        },
+                        value,
+                    )?;
+                    let result = execute_statements(body, scope, output, functions, types);
+                    scope.pop_frame();
+                    match result? {
+                        ExecutionFlow::Break => break,
+                        ExecutionFlow::Continue | ExecutionFlow::LoopContinue => {}
+                        flow @ ExecutionFlow::Return(_) => return Ok(flow),
+                    }
+                }
+            }
+            Statement::Switch { expression, cases } => {
+                let value = expression.evaluate(scope, functions, types, output)?;
+                let (enum_name, variant, payload) = match value {
+                    Literal::Enum {
+                        name,
+                        variant,
+                        payload,
+                    } => (name, variant, payload),
+                    _ => return Err("switch richiede un valore enum".to_string()),
+                };
+                let selected = cases
+                    .iter()
+                    .find(|case| {
+                        case.enum_name.as_deref() == Some(&enum_name)
+                            && case.variant.as_deref() == Some(&variant)
+                    })
+                    .or_else(|| cases.iter().find(|case| case.enum_name.is_none()))
+                    .ok_or_else(|| "switch senza case corrispondente o default".to_string())?;
+                if !selected.bindings.is_empty() && selected.bindings.len() != payload.len() {
+                    return Err(format!(
+                        "pattern {enum_name}::{variant} ha {} binding per {} valori",
+                        selected.bindings.len(),
+                        payload.len()
+                    ));
+                }
+                scope.push_frame();
+                for (name, value) in selected.bindings.iter().zip(payload) {
+                    let ty = types
+                        .enums
+                        .iter()
+                        .find(|item| item.name == enum_name)
+                        .and_then(|item| item.variants.iter().find(|v| v.name == variant))
+                        .and_then(|v| {
+                            v.payload.get(
+                                selected
+                                    .bindings
+                                    .iter()
+                                    .position(|binding| binding == name)
+                                    .unwrap_or(0),
+                            )
+                        })
+                        .cloned()
+                        .unwrap_or_else(|| infer_literal_type(&value));
+                    scope.declare(
+                        &VariableDeclaration {
+                            name: name.clone(),
+                            mutability: Mutability::Constant,
+                            ty,
+                            value: Expression::Literal(value.clone()),
+                        },
+                        value,
+                    )?;
+                }
+                let result = execute_statements(&selected.body, scope, output, functions, types);
+                scope.pop_frame();
+                match result? {
+                    ExecutionFlow::Continue | ExecutionFlow::Break => {}
+                    flow => return Ok(flow),
+                }
+            }
+            Statement::Break => return Ok(ExecutionFlow::Break),
+            Statement::Continue => return Ok(ExecutionFlow::LoopContinue),
             Statement::Chunk { name: _, body } => {
                 // Il figlio eredita una copia dell'ambiente: puo' leggere e modificare
                 // una let.mut ereditata, ma la modifica viene scartata alla chiusura.
                 let mut child_scope = scope.clone();
                 child_scope.push_frame();
-                if let ExecutionFlow::Return(value) =
-                    execute_statements(body, &mut child_scope, output, functions)?
-                {
-                    return Ok(ExecutionFlow::Return(value));
+                match execute_statements(body, &mut child_scope, output, functions, types)? {
+                    ExecutionFlow::Continue => {}
+                    flow => return Ok(flow),
                 }
             }
         }
     }
     Ok(ExecutionFlow::Continue)
+}
+
+enum PathPart {
+    Field(String),
+    Index(usize),
+}
+
+fn assign_field(
+    target: &Expression,
+    expression: &Expression,
+    scope: &mut Scope,
+    functions: &[Function],
+    types: &TypeRegistry<'_>,
+    output: &mut Vec<String>,
+) -> Result<(), String> {
+    fn collect(
+        target: &Expression,
+        scope: &mut Scope,
+        functions: &[Function],
+        types: &TypeRegistry<'_>,
+        output: &mut Vec<String>,
+        path: &mut Vec<PathPart>,
+    ) -> Result<String, String> {
+        match target {
+            Expression::Variable(name) => Ok(name.clone()),
+            Expression::Field { value, name } => {
+                let root = collect(value, scope, functions, types, output, path)?;
+                path.push(PathPart::Field(name.clone()));
+                Ok(root)
+            }
+            Expression::Index { array, index } => {
+                let root = collect(array, scope, functions, types, output, path)?;
+                let index = index
+                    .evaluate(scope, functions, types, output)?
+                    .as_integer("indice array")?;
+                let index =
+                    usize::try_from(index).map_err(|_| "indice array negativo".to_string())?;
+                path.push(PathPart::Index(index));
+                Ok(root)
+            }
+            _ => Err("assegnazione possibile solo a un campo o elemento nominato".to_string()),
+        }
+    }
+    fn update(
+        value: &mut Literal,
+        path: &[PathPart],
+        replacement: Literal,
+        type_registry: &TypeRegistry<'_>,
+    ) -> Result<(), String> {
+        let Some((part, tail)) = path.split_first() else {
+            *value = replacement;
+            return Ok(());
+        };
+        match part {
+            PathPart::Index(index) => match value {
+                Literal::Array(values) => {
+                    let slot = values
+                        .get_mut(*index)
+                        .ok_or_else(|| format!("indice {index} fuori dai limiti dell'array"))?;
+                    update(slot, tail, replacement, type_registry)
+                }
+                _ => Err("l'indice richiede un array".to_string()),
+            },
+            PathPart::Field(name) => match value {
+                Literal::Struct {
+                    name: type_name,
+                    fields,
+                } => {
+                    let field = fields
+                        .iter_mut()
+                        .find(|(field_name, _, _)| field_name == name)
+                        .ok_or_else(|| format!("campo '{name}' non trovato in '{type_name}'"))?;
+                    if field.2 == Mutability::Constant {
+                        return Err(format!("il campo '{name}' e' const"));
+                    }
+                    if tail.is_empty() {
+                        let definition = type_registry
+                            .structs
+                            .iter()
+                            .find(|definition| definition.name == *type_name)
+                            .and_then(|definition| {
+                                definition.fields.iter().find(|field| field.name == *name)
+                            })
+                            .ok_or_else(|| format!("definizione del campo '{name}' non trovata"))?;
+                        definition.ty.validate_value_named(name, &replacement)?;
+                    }
+                    update(&mut field.1, tail, replacement, type_registry)
+                }
+                _ => Err("l'accesso con '.' richiede una struct".to_string()),
+            },
+        }
+    }
+    let replacement = expression.evaluate(scope, functions, types, output)?;
+    let mut path = Vec::new();
+    let root = collect(target, scope, functions, types, output, &mut path)?;
+    let variable = scope
+        .get(&root)
+        .cloned()
+        .ok_or_else(|| format!("la variabile '{root}' non e' stata dichiarata"))?;
+    let mut value = variable.value;
+    update(&mut value, &path, replacement, types)?;
+    scope.assign(&root, value)
 }
 
 fn invoke_function(
@@ -354,7 +878,76 @@ fn invoke_function(
     scope: &mut Scope,
     output: &mut Vec<String>,
     functions: &[Function],
+    types: &TypeRegistry<'_>,
 ) -> Result<Option<Literal>, String> {
+    if name == "length" || name == "push" || name == "pop" {
+        let expected = if name == "push" { 2 } else { 1 };
+        if arguments.len() != expected {
+            return Err(format!("'{name}' richiede {expected} argomenti"));
+        }
+        let array_name = match &arguments[0] {
+            Expression::Variable(name) => name,
+            _ => {
+                return Err(format!(
+                    "il primo argomento di '{name}' deve essere una variabile array"
+                ));
+            }
+        };
+        let variable = scope
+            .get(array_name)
+            .cloned()
+            .ok_or_else(|| format!("la variabile '{array_name}' non e' stata dichiarata"))?;
+        let mut items = match variable.value {
+            Literal::Array(items) => items,
+            _ => return Err(format!("'{array_name}' non e' un array")),
+        };
+        match name {
+            "length" => return Ok(Some(Literal::Integer(items.len() as i64))),
+            "push" => {
+                if variable.mutability == Mutability::Constant {
+                    return Err(format!(
+                        "non puoi modificare '{array_name}': e' una let.const"
+                    ));
+                }
+                let (element, capacity, dynamic) = match &variable.ty {
+                    VariableType::Array {
+                        element,
+                        capacity,
+                        dynamic,
+                    } => (element, capacity, dynamic),
+                    _ => return Err(format!("'{array_name}' non e' un array tipizzato")),
+                };
+                if !dynamic {
+                    return Err(format!(
+                        "push richiede un array dinamico, '{array_name}' e' a dimensione fissa"
+                    ));
+                }
+                if items.len() >= *capacity {
+                    return Err(format!(
+                        "capacita' massima raggiunta per l'array '{array_name}'"
+                    ));
+                }
+                let value = arguments[1].evaluate(scope, functions, types, output)?;
+                element.validate_value_named(array_name, &value)?;
+                items.push(value);
+                scope.assign(array_name, Literal::Array(items))?;
+                return Ok(None);
+            }
+            "pop" => {
+                if variable.mutability == Mutability::Constant {
+                    return Err(format!(
+                        "non puoi modificare '{array_name}': e' una let.const"
+                    ));
+                }
+                let value = items
+                    .pop()
+                    .ok_or_else(|| format!("pop su array vuoto '{array_name}'"))?;
+                scope.assign(array_name, Literal::Array(items))?;
+                return Ok(Some(value));
+            }
+            _ => unreachable!(),
+        }
+    }
     let function = functions
         .iter()
         .find(|function| function.name == name)
@@ -370,7 +963,7 @@ fn invoke_function(
 
     let values = arguments
         .iter()
-        .map(|argument| argument.evaluate(scope, functions, output))
+        .map(|argument| argument.evaluate(scope, functions, types, output))
         .collect::<Result<Vec<_>, _>>()?;
 
     scope.push_frame();
@@ -395,11 +988,14 @@ fn invoke_function(
         return Err(error);
     }
 
-    let execution = execute_statements(&function.body, scope, output, functions);
+    let execution = execute_statements(&function.body, scope, output, functions, types);
     scope.pop_frame();
     let returned = match execution? {
         ExecutionFlow::Continue => None,
         ExecutionFlow::Return(value) => Some(value),
+        ExecutionFlow::Break | ExecutionFlow::LoopContinue => {
+            return Err("break/continue fuori da un ciclo".to_string());
+        }
     };
 
     match (function.return_type, returned) {
@@ -408,7 +1004,9 @@ fn invoke_function(
             Ok(Some(value))
         }
         (Some(_), _) => Err(format!("la funzione '{name}' non ha restituito un valore")),
-        (None, Some(Some(_))) => Err(format!("la funzione '{name}' e' void e non puo' restituire un valore")),
+        (None, Some(Some(_))) => Err(format!(
+            "la funzione '{name}' e' void e non puo' restituire un valore"
+        )),
         (None, Some(None) | None) => Ok(None),
     }
 }
@@ -435,6 +1033,32 @@ impl VariableType {
             (Self::Bool, Literal::Bool(_)) => Ok(()),
             (Self::String { .. }, Literal::String(_)) => Ok(()),
             (Self::Float { .. }, Literal::Float(_)) => Ok(()),
+            (
+                Self::Array {
+                    element,
+                    capacity,
+                    dynamic,
+                },
+                Literal::Array(values),
+            ) => {
+                if (!*dynamic && values.len() != *capacity)
+                    || (*dynamic && values.len() > *capacity)
+                {
+                    return Err(format!(
+                        "dimensione non valida per l'array '{name}': {} elementi, capacita' {capacity}",
+                        values.len()
+                    ));
+                }
+                for item in values {
+                    element.validate_value_named(name, item)?;
+                }
+                Ok(())
+            }
+            (Self::Named(expected), Literal::Struct { name, .. } | Literal::Enum { name, .. })
+                if expected == name =>
+            {
+                Ok(())
+            }
             (Self::Integer { bits, unsigned }, Literal::Integer(value)) => {
                 let (minimum, maximum) = integer_range(*bits, *unsigned);
                 if *value < minimum || *value > maximum {
@@ -461,6 +1085,8 @@ impl VariableType {
             Self::Float { .. } => "float",
             Self::String { .. } => "stringa",
             Self::Bool => "booleano",
+            Self::Array { .. } => "array",
+            Self::Named(_) | Self::Struct(_) | Self::Enum(_) => "tipo composto",
         }
     }
 
@@ -471,6 +1097,9 @@ impl VariableType {
                 Literal::Float(_) => "float",
                 Literal::String(_) => "string",
                 Literal::Bool(_) => "bool",
+                Literal::Array(_) => "array",
+                Literal::Struct { .. } => "struct",
+                Literal::Enum { .. } => "enum",
             },
             Self::Integer {
                 bits: 8,
@@ -503,6 +1132,8 @@ impl VariableType {
             Self::String { bits: 16 } => "16bit.string",
             Self::String { bits: 32 } => "32bit.string",
             Self::Bool => "bool",
+            Self::Array { .. } => "array",
+            Self::Named(_) | Self::Struct(_) | Self::Enum(_) => "tipo composto",
             _ => unreachable!("la grammatica ammette solo 8, 16 o 32 bit"),
         }
     }
@@ -523,6 +1154,8 @@ impl VariableType {
             Self::Integer { bits, .. } | Self::Float { bits } | Self::String { bits } => *bits,
             Self::Inferred if matches!(value, Literal::Integer(_)) => 32,
             Self::Bool => 1,
+            Self::Array { .. } => 0,
+            Self::Named(_) | Self::Struct(_) | Self::Enum(_) => 0,
             Self::Inferred => 0,
         }
     }
@@ -535,6 +1168,9 @@ impl Literal {
             Self::Float(_) => "float",
             Self::String(_) => "stringa",
             Self::Bool(_) => "booleano",
+            Self::Array(_) => "array",
+            Self::Struct { .. } => "struct",
+            Self::Enum { .. } => "enum",
         }
     }
 
@@ -544,13 +1180,19 @@ impl Literal {
             Self::Float(value) => value.to_string(),
             Self::String(value) => value.clone(),
             Self::Bool(value) => value.to_string(),
+            Self::Array(values) => format!("[{} elementi]", values.len()),
+            Self::Struct { name, .. } => format!("{name} {{...}}"),
+            Self::Enum { name, variant, .. } => format!("{name}::{variant}"),
         }
     }
 
     fn as_bool(&self, context: &str) -> Result<bool, String> {
         match self {
             Self::Bool(value) => Ok(*value),
-            _ => Err(format!("{context} deve essere un booleano, trovato {}", self.name())),
+            _ => Err(format!(
+                "{context} deve essere un booleano, trovato {}",
+                self.name()
+            )),
         }
     }
 
@@ -575,6 +1217,7 @@ impl Expression {
         &self,
         scope: &mut Scope,
         functions: &[Function],
+        types: &TypeRegistry<'_>,
         output: &mut Vec<String>,
     ) -> Result<Literal, String> {
         match self {
@@ -601,47 +1244,234 @@ impl Expression {
             Self::Unary {
                 operator,
                 expression,
-            } => operator.evaluate(expression.evaluate(scope, functions, output)?),
+            } => operator.evaluate(expression.evaluate(scope, functions, types, output)?),
             Self::Binary {
                 left,
                 operator,
                 right,
             } => {
                 if matches!(operator, BinaryOperator::LogicalAnd) {
-                    let left = left.evaluate(scope, functions, output)?.as_bool("il lato sinistro di &&")?;
+                    let left = left
+                        .evaluate(scope, functions, types, output)?
+                        .as_bool("il lato sinistro di &&")?;
                     return if left {
-                        Ok(Literal::Bool(right.evaluate(scope, functions, output)?.as_bool("il lato destro di &&")?))
+                        Ok(Literal::Bool(
+                            right
+                                .evaluate(scope, functions, types, output)?
+                                .as_bool("il lato destro di &&")?,
+                        ))
                     } else {
                         Ok(Literal::Bool(false))
                     };
                 }
                 if matches!(operator, BinaryOperator::LogicalOr) {
-                    let left = left.evaluate(scope, functions, output)?.as_bool("il lato sinistro di ||")?;
+                    let left = left
+                        .evaluate(scope, functions, types, output)?
+                        .as_bool("il lato sinistro di ||")?;
                     return if left {
                         Ok(Literal::Bool(true))
                     } else {
-                        Ok(Literal::Bool(right.evaluate(scope, functions, output)?.as_bool("il lato destro di ||")?))
+                        Ok(Literal::Bool(
+                            right
+                                .evaluate(scope, functions, types, output)?
+                                .as_bool("il lato destro di ||")?,
+                        ))
                     };
                 }
-                operator.evaluate(left.evaluate(scope, functions, output)?, right.evaluate(scope, functions, output)?)
+                let left_value = left.evaluate(scope, functions, types, output)?;
+                let right_value = right.evaluate(scope, functions, types, output)?;
+                if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual)
+                    && !matches!(left.as_ref(), Self::EnumVariant { payload, .. } if payload.is_empty())
+                    && !matches!(right.as_ref(), Self::EnumVariant { payload, .. } if payload.is_empty())
+                    && (matches!(&left_value, Literal::Enum { .. })
+                        || matches!(&right_value, Literal::Enum { .. }))
+                {
+                    return Err(
+                        "un enum con payload si confronta con switch, non con ==/!=".to_string()
+                    );
+                }
+                operator.evaluate(left_value, right_value)
             }
-            Self::Call { name, arguments } => {
-                invoke_function(name, arguments, scope, output, functions)?
-                    .ok_or_else(|| format!("la funzione '{name}' e' void e non restituisce un valore"))
+            Self::Call { name, arguments } => invoke_function(
+                name, arguments, scope, output, functions, types,
+            )?
+            .ok_or_else(|| format!("la funzione '{name}' e' void e non restituisce un valore")),
+            Self::Array(values) => Ok(Literal::Array(
+                values
+                    .iter()
+                    .map(|value| value.evaluate(scope, functions, types, output))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            Self::Index { array, index } => {
+                let array = array.evaluate(scope, functions, types, output)?;
+                let index = index
+                    .evaluate(scope, functions, types, output)?
+                    .as_integer("indice array")?;
+                let index =
+                    usize::try_from(index).map_err(|_| "indice array negativo".to_string())?;
+                match array {
+                    Literal::Array(values) => values
+                        .get(index)
+                        .cloned()
+                        .ok_or_else(|| format!("indice {index} fuori dai limiti dell'array")),
+                    _ => Err("l'indicizzazione richiede un array".to_string()),
+                }
+            }
+            Self::StructLiteral { name, fields } => {
+                let definition = types
+                    .structs
+                    .iter()
+                    .find(|definition| definition.name == *name)
+                    .ok_or_else(|| format!("struct '{name}' non dichiarata"))?;
+                if fields.len() != definition.fields.len() {
+                    return Err(format!(
+                        "inizializzatore di '{name}': attesi {} campi, ricevuti {}",
+                        definition.fields.len(),
+                        fields.len()
+                    ));
+                }
+                let mut result = Vec::with_capacity(fields.len());
+                for field in &definition.fields {
+                    let (_, expression) = fields
+                        .iter()
+                        .find(|(field_name, _)| field_name == &field.name)
+                        .ok_or_else(|| format!("campo '{}' mancante in '{name}'", field.name))?;
+                    let value = expression.evaluate(scope, functions, types, output)?;
+                    field.ty.validate_value_named(&field.name, &value)?;
+                    result.push((field.name.clone(), value, field.mutability));
+                }
+                Ok(Literal::Struct {
+                    name: name.clone(),
+                    fields: result,
+                })
+            }
+            Self::DefaultStruct(name) => {
+                let definition = types
+                    .structs
+                    .iter()
+                    .find(|definition| definition.name == *name)
+                    .ok_or_else(|| format!("struct '{name}' non dichiarata"))?;
+                let fields = definition
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        Ok((
+                            field.name.clone(),
+                            default_value(&field.ty, types)?,
+                            field.mutability,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Literal::Struct {
+                    name: name.clone(),
+                    fields,
+                })
+            }
+            Self::EnumVariant {
+                name,
+                variant,
+                payload,
+            } => {
+                let definition = types
+                    .enums
+                    .iter()
+                    .find(|definition| definition.name == *name)
+                    .ok_or_else(|| format!("enum '{name}' non dichiarato"))?;
+                let variant_def = definition
+                    .variants
+                    .iter()
+                    .find(|item| item.name == *variant)
+                    .ok_or_else(|| format!("variante '{name}::{variant}' non dichiarata"))?;
+                if payload.len() != variant_def.payload.len() {
+                    return Err(format!(
+                        "variante '{name}::{variant}' richiede {} valori",
+                        variant_def.payload.len()
+                    ));
+                }
+                let values = payload
+                    .iter()
+                    .zip(&variant_def.payload)
+                    .map(|(expression, ty)| {
+                        let value = expression.evaluate(scope, functions, types, output)?;
+                        ty.validate_value_named("payload enum", &value)?;
+                        Ok(value)
+                    })
+                    .collect::<Result<Vec<_>, String>>()?;
+                Ok(Literal::Enum {
+                    name: name.clone(),
+                    variant: variant.clone(),
+                    payload: values,
+                })
+            }
+            Self::Field { value, name } => {
+                match value.evaluate(scope, functions, types, output)? {
+                    Literal::Struct { fields, .. } => fields
+                        .into_iter()
+                        .find(|(field, _, _)| field == name)
+                        .map(|(_, value, _)| value)
+                        .ok_or_else(|| format!("campo '{name}' non trovato")),
+                    _ => Err("l'accesso con '.' richiede una struct".to_string()),
+                }
             }
             Self::If {
                 condition,
                 then_value,
                 else_value,
             } => {
-                if condition.evaluate(scope, functions, output)?.as_bool("la condizione di if")? {
-                    then_value.evaluate(scope, functions, output)
+                if condition
+                    .evaluate(scope, functions, types, output)?
+                    .as_bool("la condizione di if")?
+                {
+                    then_value.evaluate(scope, functions, types, output)
                 } else {
-                    else_value.evaluate(scope, functions, output)
+                    else_value.evaluate(scope, functions, types, output)
                 }
             }
         }
     }
+}
+
+fn default_value(ty: &VariableType, types: &TypeRegistry<'_>) -> Result<Literal, String> {
+    Ok(match ty {
+        VariableType::Inferred | VariableType::Integer { .. } => Literal::Integer(0),
+        VariableType::Float { .. } => Literal::Float(0.0),
+        VariableType::String { .. } => Literal::String(String::new()),
+        VariableType::Bool => Literal::Bool(false),
+        VariableType::Array {
+            element,
+            capacity,
+            dynamic,
+        } => {
+            let count = if *dynamic { 0 } else { *capacity };
+            Literal::Array(
+                (0..count)
+                    .map(|_| default_value(element, types))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        }
+        VariableType::Named(name) | VariableType::Struct(name) => {
+            let definition = types
+                .structs
+                .iter()
+                .find(|item| item.name == *name)
+                .ok_or_else(|| format!("tipo '{name}' non inizializzabile con default()"))?;
+            Literal::Struct {
+                name: name.clone(),
+                fields: definition
+                    .fields
+                    .iter()
+                    .map(|field| {
+                        Ok((
+                            field.name.clone(),
+                            default_value(&field.ty, types)?,
+                            field.mutability,
+                        ))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            }
+        }
+        VariableType::Enum(_) => return Err("default() su enum non è supportato".to_string()),
+    })
 }
 
 impl IntrospectionKind {
@@ -692,16 +1522,24 @@ impl UnaryOperator {
 impl BinaryOperator {
     fn evaluate(self, left: Literal, right: Literal) -> Result<Literal, String> {
         match self {
-            Self::Add | Self::Subtract | Self::Multiply | Self::Divide | Self::Remainder | Self::Power => {
-                self.evaluate_math(left, right)
-            }
-            Self::Equal | Self::NotEqual | Self::Greater | Self::Less | Self::GreaterEqual | Self::LessEqual => {
-                self.evaluate_comparison(left, right)
-            }
+            Self::Add
+            | Self::Subtract
+            | Self::Multiply
+            | Self::Divide
+            | Self::Remainder
+            | Self::Power => self.evaluate_math(left, right),
+            Self::Equal
+            | Self::NotEqual
+            | Self::Greater
+            | Self::Less
+            | Self::GreaterEqual
+            | Self::LessEqual => self.evaluate_comparison(left, right),
             Self::BitAnd | Self::BitOr | Self::BitXor | Self::ShiftLeft | Self::ShiftRight => {
                 self.evaluate_bitwise(left, right)
             }
-            Self::LogicalAnd | Self::LogicalOr => unreachable!("gli operatori logici sono short-circuit"),
+            Self::LogicalAnd | Self::LogicalOr => {
+                unreachable!("gli operatori logici sono short-circuit")
+            }
         }
     }
 
